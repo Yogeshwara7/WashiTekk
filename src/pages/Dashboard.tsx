@@ -1,0 +1,611 @@
+import React, { useEffect, useState } from 'react';
+import { auth, db, storage } from '../firebase';
+import { onAuthStateChanged } from 'firebase/auth';
+import { doc, getDoc, collection, addDoc, Timestamp, onSnapshot, query, orderBy, updateDoc, setDoc, getDocs, where } from 'firebase/firestore';
+import { useNavigate } from 'react-router-dom';
+import MembershipPlan from '../components/MembershipPlan';
+import { CheckCircle, CreditCard, UserCircle, RefreshCw, TrendingUp, Bell, ChevronDown, Moon, Sun } from 'lucide-react';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import jsPDF from 'jspdf';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Mail, Phone } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { colors } from '@/styles/colors';
+import { generateReceipt, loadImageAsBase64 } from '../utils/generateReceipt';
+
+const availablePlans = [
+  { name: 'Elite', price: 3000, duration: '3 Months' },
+  { name: 'Elite Plus', price: 10000, duration: '1 Year' }
+];
+
+// Add notification type for TypeScript
+interface UserNotification {
+  id: string;
+  title?: string;
+  body?: string;
+  type?: string;
+  read?: boolean;
+  createdAt?: any;
+}
+
+const Dashboard = () => {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [dashboard, setDashboard] = useState(null);
+  const [error, setError] = useState('');
+  const [showRenewModal, setShowRenewModal] = useState(false);
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [upgradePlan, setUpgradePlan] = useState(null);
+  const [showSupportModal, setShowSupportModal] = useState(false);
+  const [supportMsg, setSupportMsg] = useState('');
+  const [supportLoading, setSupportLoading] = useState(false);
+  const [supportSuccess, setSupportSuccess] = useState(false);
+  const [supportSubject, setSupportSubject] = useState('');
+  const [supportCategory, setSupportCategory] = useState('Technical Issue');
+  const [supportPriority, setSupportPriority] = useState('Normal');
+  const [supportFile, setSupportFile] = useState(null);
+  const [supportFileUrl, setSupportFileUrl] = useState('');
+  const [supportError, setSupportError] = useState('');
+  const [notifications, setNotifications] = useState<UserNotification[]>([]);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [notifUnread, setNotifUnread] = useState(0);
+  const [faqOpen, setFaqOpen] = useState<number | null>(null);
+  const [darkMode, setDarkMode] = useState(() => localStorage.getItem('darkMode') === 'true');
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [profileForm, setProfileForm] = useState({ name: user?.displayName || '', phone: '', address: { street: '', city: '', state: '', zip: '', country: '' } });
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileMsg, setProfileMsg] = useState('');
+  const [bookings, setBookings] = useState([]);
+  const [showAllBookings, setShowAllBookings] = useState(false);
+  const [showAllPayments, setShowAllPayments] = useState(false);
+  const faqs = [
+    {
+      q: 'How do I renew or upgrade my plan?',
+      a: 'Go to your dashboard and click the "Renew Plan" or "Upgrade" button in the Current Plan section.'
+    },
+    {
+      q: 'How can I contact support?',
+      a: 'Use the Feedback & Support button in your dashboard to send us a message. We will get back to you as soon as possible.'
+    },
+    {
+      q: 'Where can I see my payment history?',
+      a: 'Your payment history is shown in the Payment History section of your dashboard.'
+    },
+    {
+      q: 'How do I download a payment receipt?',
+      a: 'Click the "Download Receipt" button next to any payment in your Payment History.'
+    },
+    {
+      q: 'Can I change my plan after purchase?',
+      a: 'Currently, plans cannot be changed once selected. Please contact support for special requests.'
+    },
+    {
+      q: 'How do I update my profile information?',
+      a: 'Click the "Edit Profile" button at the top of your dashboard.'
+    }
+  ];
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (!firebaseUser) {
+        navigate('/login');
+        return;
+      }
+      setUser(firebaseUser);
+      try {
+        const docRef = doc(db, 'users', firebaseUser.uid);
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          setDashboard(docSnap.data());
+        } else {
+          setDashboard(null);
+        }
+      } catch (err) {
+        setError('Failed to load dashboard data.');
+      }
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, [navigate]);
+
+  // Fetch notifications in real-time
+  useEffect(() => {
+    if (!user) return;
+    const notifRef = collection(db, 'users', user.uid, 'notifications');
+    const q = query(notifRef, orderBy('createdAt', 'desc'));
+    const unsub = onSnapshot(q, snap => {
+      const notifs = snap.docs.map(d => ({ id: d.id, ...d.data() } as UserNotification));
+      setNotifications(notifs);
+      setNotifUnread(notifs.filter(n => !n.read).length);
+    });
+    return () => unsub();
+  }, [user]);
+
+  const markAllRead = async () => {
+    if (!user) return;
+    const notifRef = collection(db, 'users', user.uid, 'notifications');
+    notifications.filter(n => !n.read).forEach(async n => {
+      await updateDoc(doc(notifRef, n.id), { read: true });
+    });
+  };
+
+  // Find current plan index
+  const currentPlanIndex = dashboard ? availablePlans.findIndex(p => p.name === dashboard.planName) : -1;
+  const canUpgrade = currentPlanIndex !== -1 && currentPlanIndex < availablePlans.length - 1;
+  const nextPlan = canUpgrade ? availablePlans[currentPlanIndex + 1] : null;
+
+  useEffect(() => {
+    if (darkMode) document.documentElement.classList.add('dark');
+    else document.documentElement.classList.remove('dark');
+    localStorage.setItem('darkMode', darkMode ? 'true' : 'false');
+  }, [darkMode]);
+
+  useEffect(() => {
+    if (!user) return;
+    // Fetch bookings for this user
+    const fetchBookings = async () => {
+      const q = query(collection(db, 'bookings'), where('email', '==', user.email));
+      const snap = await getDocs(q);
+      setBookings(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    };
+    fetchBookings();
+  }, [user]);
+
+  console.log({ user, dashboard, loading, error });
+
+  if (loading) return <div className="flex justify-center items-center h-64">Loading...</div>;
+  if (error) return <div className="text-red-600 text-center mt-8">{error}</div>;
+
+  return (
+    <div className={`max-w-3xl mx-auto py-12 px-2 md:px-4 space-y-8 pt-24 transition-colors duration-300 ${darkMode ? 'dark bg-brand-bg' : 'bg-brand-bg'}`}>
+      <div className="flex justify-between items-center mb-4">
+        <h1 className="text-4xl font-extrabold text-blue-900 dark:text-brand-headline text-center tracking-tight dark:drop-shadow-lg">
+          Welcome to Your Dashboard
+        </h1>
+        <div className="flex items-center gap-2">
+          <button
+            className="p-2 rounded-full hover:bg-brand-main transition"
+            onClick={() => setDarkMode(d => !d)}
+            aria-label="Toggle Dark Mode"
+          >
+            {darkMode ? <Sun className="w-6 h-6 text-brand-highlight" /> : <Moon className="w-6 h-6 text-blue-900 dark:text-brand-headline" />}
+          </button>
+        </div>
+      </div>
+      {/* Profile Section */}
+      <div className="bg-gradient-to-r from-blue-50 to-blue-100 rounded-2xl shadow-lg p-6 flex flex-col md:flex-row md:items-center md:justify-between gap-6 border border-blue-100">
+        <div className="flex items-center gap-4">
+          <UserCircle className="w-12 h-12 text-blue-400" />
+          <div>
+            <div className="text-xl font-bold text-gray-800 mb-1">Hello, {user?.displayName || user?.email}</div>
+            <div className="text-gray-500 text-sm">Manage your membership, payments, and profile here.</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Current Plan Section */}
+      <div className="bg-white rounded-2xl shadow-lg p-6 border border-blue-100">
+        <div className="flex items-center gap-3 mb-2">
+          <TrendingUp className="w-6 h-6 text-green-500" />
+          <h2 className="text-2xl font-bold text-blue-700">Current Plan</h2>
+        </div>
+        {dashboard ? (
+          <>
+            {/* Pending or Rejected Plan Request Info */}
+            {dashboard.planRequest?.status === 'pending' && (
+              <div className="mb-3 p-3 rounded-lg bg-yellow-50 border border-yellow-200 text-yellow-800 flex items-center gap-2">
+                <svg className="w-5 h-5 text-yellow-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M12 20a8 8 0 100-16 8 8 0 000 16z" /></svg>
+                <span>Your plan request is <b>pending</b> admin approval.</span>
+              </div>
+            )}
+            {dashboard.planRequest?.status === 'rejected' && (
+              <div className="mb-3 p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 flex items-center gap-2">
+                <svg className="w-5 h-5 text-red-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M18.364 5.636l-1.414 1.414M6.343 17.657l-1.414-1.414M6.343 6.343l1.414 1.414M17.657 17.657l1.414-1.414M12 8v4m0 4h.01" /></svg>
+                <span>Your plan request was <b>rejected</b>. Please contact support or try again.</span>
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-4 mb-2">
+              <span className="text-lg font-bold text-blue-600">{dashboard.planName}</span>
+              <span className="text-gray-500">₹{dashboard.planPrice} / {dashboard.planDuration}</span>
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-green-50 text-green-700 font-semibold text-xs"><CheckCircle className="w-4 h-4" />{dashboard.planStatus || 'Active'}</span>
+            </div>
+            {/* KG Usage Progress */}
+            {dashboard.planKG && (
+              <div className="mb-2">
+                <div className="text-gray-600">KG Usage:</div>
+                <div className="flex items-center gap-2">
+                  <div className="w-48 h-3 bg-gray-200 rounded-full overflow-hidden">
+                    <div className="h-3 bg-blue-500 rounded-full" style={{ width: `${Math.min(100, Math.round(((dashboard.usage || 0) / dashboard.planKG) * 100))}%` }}></div>
+                  </div>
+                  <span className="font-semibold text-blue-700">{dashboard.usage || 0} / {dashboard.planKG} KG</span>
+                </div>
+              </div>
+            )}
+            <div className="mt-4 flex gap-4">
+              <button
+                className="px-6 py-2 bg-blue-600 text-white rounded-lg shadow hover:bg-blue-700 font-semibold transition"
+                onClick={() => setShowRenewModal(true)}
+              >
+                <RefreshCw className="w-4 h-4 inline mr-1" />Renew Plan
+              </button>
+              {canUpgrade && nextPlan && (
+                <button
+                  className="px-6 py-2 bg-green-600 text-white rounded-lg shadow hover:bg-green-700 font-semibold transition"
+                  onClick={() => { setUpgradePlan(nextPlan); setShowUpgradeModal(true); }}
+                >
+                  <TrendingUp className="w-4 h-4 inline mr-1" />Upgrade to {nextPlan.name}
+                </button>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="text-gray-500">No plan found. Please purchase a plan.</div>
+        )}
+      </div>
+
+      {/* Payment History Section */}
+      <div className="bg-white rounded-2xl shadow-lg p-6 border border-blue-100">
+        <div className="flex items-center gap-3 mb-2 relative">
+          <CreditCard className="w-7 h-7 text-purple-500" />
+          <h2 className="text-3xl font-extrabold mb-0 text-blue-700 border-l-4 border-purple-500 pl-4">Payment History</h2>
+          <button
+            className="absolute right-0 top-1 flex items-center gap-1 text-blue-700 hover:underline text-sm font-semibold"
+            onClick={() => setShowAllPayments(true)}
+            aria-label="View All Payments"
+          >
+            View All
+            <ChevronDown className="w-4 h-4" />
+          </button>
+        </div>
+        <hr className="mb-6 border-purple-200" />
+        {dashboard && dashboard.payments && dashboard.payments.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full rounded-xl shadow-md overflow-hidden">
+              <thead>
+                <tr className="bg-blue-100 dark:bg-blue-900">
+                  <th className="py-3 px-6 text-blue-900 dark:text-blue-100 text-base font-bold">Date</th>
+                  <th className="py-3 px-6 text-blue-900 dark:text-blue-100 text-base font-bold">Amount</th>
+                  <th className="py-3 px-6 text-blue-900 dark:text-blue-100 text-base font-bold">Status</th>
+                  <th className="py-3 px-6 text-blue-900 dark:text-blue-100 text-base font-bold">Receipt</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dashboard.payments.slice(0, 2).map((p, i) => (
+                  <tr key={i} className={`border-t ${i % 2 === 0 ? 'bg-gray-50 dark:bg-gray-800' : 'bg-white dark:bg-gray-900'} hover:bg-blue-50 dark:hover:bg-blue-950 transition`}>
+                    <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{p.date}</td>
+                    <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">₹{p.amount}</td>
+                    <td className="py-3 px-6 align-middle">
+                      <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${p.status === 'Success' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>{p.status}</span>
+                    </td>
+                    <td className="py-3 px-6 align-middle">
+                      <button
+                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-xs font-semibold transition"
+                        onClick={() => {
+                          loadImageAsBase64('/signn.png', (signatureBase64) => {
+                            generateReceipt(p, user, dashboard, signatureBase64);
+                          });
+                        }}
+                      >
+                        Download Receipt
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="text-gray-500">No payments found.</div>
+        )}
+      </div>
+      {/* All Payments Modal */}
+      {showAllPayments && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-3xl w-full relative">
+            <button className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl" onClick={() => setShowAllPayments(false)} aria-label="Close">×</button>
+            <h2 className="text-2xl font-bold mb-4 text-blue-700">All Payments</h2>
+            <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
+              <table className="w-full rounded-xl shadow-md overflow-hidden">
+                <thead>
+                  <tr className="bg-blue-100 dark:bg-blue-900">
+                    <th className="py-3 px-6 text-blue-900 dark:text-blue-100 text-base font-bold">Date</th>
+                    <th className="py-3 px-6 text-blue-900 dark:text-blue-100 text-base font-bold">Amount</th>
+                    <th className="py-3 px-6 text-blue-900 dark:text-blue-100 text-base font-bold">Status</th>
+                    <th className="py-3 px-6 text-blue-900 dark:text-blue-100 text-base font-bold">Receipt</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dashboard.payments.map((p, i) => (
+                    <tr key={i} className={`border-t ${i % 2 === 0 ? 'bg-gray-50 dark:bg-gray-800' : 'bg-white dark:bg-gray-900'} hover:bg-blue-50 dark:hover:bg-blue-950 transition`}>
+                      <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{p.date}</td>
+                      <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">₹{p.amount}</td>
+                      <td className="py-3 px-6 align-middle">
+                        <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${p.status === 'Success' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>{p.status}</span>
+                      </td>
+                      <td className="py-3 px-6 align-middle">
+                        <button
+                          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-xs font-semibold transition"
+                          onClick={() => {
+                            loadImageAsBase64('/signn.png', (signatureBase64) => {
+                              generateReceipt(p, user, dashboard, signatureBase64);
+                            });
+                          }}
+                        >
+                          Download Receipt
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* My Bookings Section */}
+      <div className="bg-white rounded-2xl shadow-lg p-6 border border-blue-100">
+        <div className="flex items-center gap-3 mb-2 relative">
+          <CreditCard className="w-7 h-7 text-green-500" />
+          <h2 className="text-3xl font-extrabold mb-0 text-green-700 border-l-4 border-green-500 pl-4">My Bookings</h2>
+          <button
+            className="absolute right-0 top-1 flex items-center gap-1 text-green-700 hover:underline text-sm font-semibold"
+            onClick={() => setShowAllBookings(true)}
+            aria-label="View All Bookings"
+          >
+            View All
+            <ChevronDown className="w-4 h-4" />
+          </button>
+        </div>
+        <hr className="mb-6 border-green-200" />
+        {bookings.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full rounded-xl shadow-md overflow-hidden">
+              <thead>
+                <tr className="bg-green-100 dark:bg-green-900">
+                  <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Service</th>
+                  <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Pickup Date</th>
+                  <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Pickup Time</th>
+                  <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Address</th>
+                  <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Status</th>
+                  <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Created At</th>
+                </tr>
+              </thead>
+              <tbody>
+                {bookings.slice(0, 2).map((b, i) => (
+                  <tr key={b.id || i} className={`border-t ${i % 2 === 0 ? 'bg-gray-50 dark:bg-gray-800' : 'bg-white dark:bg-gray-900'} hover:bg-green-50 dark:hover:bg-green-950 transition`}>
+                    <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.service}</td>
+                    <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.pickupDate}</td>
+                    <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.pickupTime}</td>
+                    <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.address}</td>
+                    <td className="py-3 px-6 align-middle">
+                      <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${b.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>{b.status || 'pending'}</span>
+                    </td>
+                    <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.createdAt?.toDate ? b.createdAt.toDate().toLocaleString() : ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="text-gray-500">No bookings found.</div>
+        )}
+      </div>
+      {/* All Bookings Modal */}
+      {showAllBookings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-3xl w-full relative">
+            <button className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl" onClick={() => setShowAllBookings(false)} aria-label="Close">×</button>
+            <h2 className="text-2xl font-bold mb-4 text-green-700">All Bookings</h2>
+            <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
+              <table className="w-full rounded-xl shadow-md overflow-hidden">
+                <thead>
+                  <tr className="bg-green-100 dark:bg-green-900">
+                    <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Service</th>
+                    <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Pickup Date</th>
+                    <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Pickup Time</th>
+                    <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Address</th>
+                    <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Status</th>
+                    <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Created At</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bookings.map((b, i) => (
+                    <tr key={b.id || i} className={`border-t ${i % 2 === 0 ? 'bg-gray-50 dark:bg-gray-800' : 'bg-white dark:bg-gray-900'} hover:bg-green-50 dark:hover:bg-green-950 transition`}>
+                      <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.service}</td>
+                      <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.pickupDate}</td>
+                      <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.pickupTime}</td>
+                      <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.address}</td>
+                      <td className="py-3 px-6 align-middle">
+                        <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${b.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>{b.status || 'pending'}</span>
+                      </td>
+                      <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.createdAt?.toDate ? b.createdAt.toDate().toLocaleString() : ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Feedback & Support Section */}
+      <div className="bg-gradient-to-r from-purple-50 to-pink-50 rounded-2xl shadow p-6 flex flex-col md:flex-row md:items-center md:justify-between gap-6 border border-purple-100">
+        <div>
+          <div className="text-lg font-semibold text-gray-700 mb-1">Feedback & Support</div>
+          <div className="text-gray-500 text-sm">Share your experience or get help with your membership.</div>
+        </div>
+        <button
+          className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 font-medium mt-4 md:mt-0 transition"
+          onClick={() => setShowSupportModal(true)}
+        >
+          Feedback & Support
+        </button>
+      </div>
+
+      {/* Renew Modal */}
+      {showRenewModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full relative">
+            <button className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl" onClick={() => setShowRenewModal(false)} aria-label="Close">×</button>
+            <h2 className="text-xl font-bold mb-4 text-blue-700">Renew Your Plan</h2>
+            <MembershipPlan preselectedPlan={availablePlans[currentPlanIndex]} onClose={() => setShowRenewModal(false)} />
+          </div>
+        </div>
+      )}
+      {/* Upgrade Modal */}
+      {showUpgradeModal && upgradePlan && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full relative">
+            <button className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl" onClick={() => setShowUpgradeModal(false)} aria-label="Close">×</button>
+            <h2 className="text-xl font-bold mb-4 text-green-700">Upgrade to {upgradePlan.name}</h2>
+            <MembershipPlan preselectedPlan={upgradePlan} onClose={() => setShowUpgradeModal(false)} />
+          </div>
+        </div>
+      )}
+      {/* Support Modal */}
+      {showSupportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full relative">
+            <button className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl" onClick={() => { setShowSupportModal(false); setSupportMsg(''); setSupportSuccess(false); setSupportSubject(''); setSupportCategory('Technical Issue'); setSupportPriority('Normal'); setSupportFile(null); setSupportFileUrl(''); setSupportError(''); }} aria-label="Close">×</button>
+            <h2 className="text-xl font-bold mb-4 text-purple-700">Feedback & Support</h2>
+            {supportSuccess ? (
+              <div className="text-green-700 font-semibold text-center py-8 flex flex-col gap-4">
+                <span>Thank you for your feedback! Our team will get back to you soon.</span>
+                <button className="mx-auto px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 font-medium" onClick={() => { setShowSupportModal(false); setSupportMsg(''); setSupportSuccess(false); setSupportSubject(''); setSupportCategory('Technical Issue'); setSupportPriority('Normal'); setSupportFile(null); setSupportFileUrl(''); setSupportError(''); }}>Close</button>
+              </div>
+            ) : (
+              <form onSubmit={async e => {
+                e.preventDefault();
+                setSupportError('');
+                if (!supportSubject.trim() || !supportMsg.trim()) {
+                  setSupportError('Subject and message are required.');
+                  return;
+                }
+                setSupportLoading(true);
+                let fileUrl = '';
+                try {
+                  if (supportFile) {
+                    const fileRef = ref(storage, `support_attachments/${Date.now()}_${supportFile.name}`);
+                    await uploadBytes(fileRef, supportFile);
+                    fileUrl = await getDownloadURL(fileRef);
+                  }
+                  await addDoc(collection(db, 'contact_messages'), {
+                    name: user?.displayName || '',
+                    email: user?.email || '',
+                    subject: supportSubject,
+                    category: supportCategory,
+                    priority: supportPriority,
+                    message: supportMsg,
+                    attachment: fileUrl,
+                    createdAt: Timestamp.now(),
+                    read: false,
+                  });
+                  setSupportSuccess(true);
+                  setSupportMsg('');
+                  setSupportSubject('');
+                  setSupportCategory('Technical Issue');
+                  setSupportPriority('Normal');
+                  setSupportFile(null);
+                  setSupportFileUrl('');
+                } catch (err) {
+                  setSupportError('Failed to send feedback. Please try again.');
+                }
+                setSupportLoading(false);
+              }}>
+                {supportError && <div className="mb-3 text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2 text-sm">{supportError}</div>}
+                <label className="block mb-2 font-medium text-gray-700">Subject<span className="text-red-500">*</span></label>
+                <input
+                  className="w-full border rounded-lg p-2 mb-4 focus:outline-none focus:ring-2 focus:ring-purple-400"
+                  placeholder="Enter subject"
+                  value={supportSubject}
+                  onChange={e => setSupportSubject(e.target.value)}
+                  required
+                />
+                <label className="block mb-2 font-medium text-gray-700">Category</label>
+                <select
+                  className="w-full border rounded-lg p-2 mb-4 focus:outline-none focus:ring-2 focus:ring-purple-400"
+                  value={supportCategory}
+                  onChange={e => setSupportCategory(e.target.value)}
+                >
+                  <option>Technical Issue</option>
+                  <option>Billing</option>
+                  <option>Suggestion</option>
+                  <option>Other</option>
+                </select>
+                <label className="block mb-2 font-medium text-gray-700">Priority</label>
+                <select
+                  className="w-full border rounded-lg p-2 mb-4 focus:outline-none focus:ring-2 focus:ring-purple-400"
+                  value={supportPriority}
+                  onChange={e => setSupportPriority(e.target.value)}
+                >
+                  <option>Low</option>
+                  <option>Normal</option>
+                  <option>High</option>
+                  <option>Critical</option>
+                </select>
+                <label className="block mb-2 font-medium text-gray-700">Attachment (optional)</label>
+                <input
+                  type="file"
+                  accept="image/*,application/pdf"
+                  className="mb-4"
+                  onChange={e => setSupportFile(e.target.files[0])}
+                />
+                <label className="block mb-2 font-medium text-gray-700">Message<span className="text-red-500">*</span></label>
+                <textarea
+                  className="w-full border rounded-lg p-3 mb-2 min-h-[100px] focus:outline-none focus:ring-2 focus:ring-purple-400"
+                  placeholder="Type your feedback or support request here..."
+                  value={supportMsg}
+                  onChange={e => setSupportMsg(e.target.value)}
+                  required
+                  maxLength={1000}
+                />
+                <div className="text-xs text-gray-500 mb-4 text-right">{supportMsg.length}/1000 characters</div>
+                <button
+                  type="submit"
+                  className="w-full py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 font-semibold transition disabled:opacity-60"
+                  disabled={supportLoading || !supportSubject.trim() || !supportMsg.trim()}
+                >
+                  {supportLoading ? 'Sending...' : 'Send Feedback'}
+                </button>
+              </form>
+            )}
+            {!supportSuccess && (
+              <button
+                type="button"
+                className="block mx-auto mt-4 text-xs text-purple-600 hover:underline"
+                onClick={() => { setShowSupportModal(false); window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); setFaqOpen(0); }}
+              >
+                View FAQ & Help Center
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+      <div className="bg-gradient-to-r from-yellow-50 to-yellow-100 rounded-2xl shadow p-6 mt-12 border border-yellow-200">
+        <h2 className="text-2xl font-bold text-yellow-800 mb-4">FAQ & Help Center</h2>
+        <div className="space-y-2">
+          {faqs.map((item, i) => (
+            <div key={i} className="border border-yellow-100 rounded-lg bg-white">
+              <button
+                className="w-full flex justify-between items-center px-4 py-3 text-left font-semibold text-yellow-900 focus:outline-none"
+                onClick={() => setFaqOpen(faqOpen === i ? null : i)}
+              >
+                <span>{item.q}</span>
+                <ChevronDown className={`w-5 h-5 ml-2 transition-transform ${faqOpen === i ? 'rotate-180' : ''}`} />
+              </button>
+              {faqOpen === i && (
+                <div className="px-4 pb-4 text-yellow-800 text-sm animate-fade-in">
+                  {item.a}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Dashboard; 

@@ -15,10 +15,15 @@ import WashAndIron from './pages/services/WashAndIron';
 import DryCleaning from './pages/services/DryCleaning';
 import SteamPress from './pages/services/SteamPress';
 import Profile from './pages/Profile';
+import AdminDashboard from './pages/AdminDashboard';
+import Dashboard from './pages/Dashboard';
+import VerifyReceipt from './pages/VerifyReceipt';
+import ScrollToTop from './components/ScrollToTop';
 
 function App() {
   return (
     <Router>
+      <ScrollToTop />
       <div className="min-h-screen flex flex-col">
         <Navbar />
         
@@ -35,6 +40,9 @@ function App() {
             <Route path="/services/dry-cleaning" element={<DryCleaning />} />
             <Route path="/services/steam-press" element={<SteamPress />} />
             <Route path="/profile" element={<Profile />} />
+            <Route path="/admin" element={<AdminDashboard />} />
+            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/verify" element={<VerifyReceipt />} />
           </Routes>
         </main>
 

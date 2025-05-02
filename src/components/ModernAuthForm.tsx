@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { auth } from '../firebase';
+import { auth, db } from '../firebase';
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, GoogleAuthProvider, signInWithPopup, signInWithPhoneNumber, RecaptchaVerifier, updateProfile } from 'firebase/auth';
+import { collection, query, where, getDocs, setDoc, doc } from 'firebase/firestore';
 
 interface ModernAuthFormProps {
   mode?: 'signup' | 'login';
@@ -19,6 +20,22 @@ const ModernAuthForm: React.FC<ModernAuthFormProps> = ({ mode = 'login', onSucce
   const [otpSent, setOtpSent] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [username, setUsername] = useState('');
+  const [usernameError, setUsernameError] = useState('');
+
+  // Username uniqueness check
+  const checkUsernameUnique = async (uname: string) => {
+    if (!uname) return;
+    const q = query(collection(db, 'users'), where('username', '==', uname));
+    const snap = await getDocs(q);
+    if (!snap.empty) {
+      setUsernameError('Username already exists');
+      return false;
+    } else {
+      setUsernameError('');
+      return true;
+    }
+  };
 
   // Email/Password Auth
   const handleEmailAuth = async (e: React.FormEvent) => {
@@ -27,10 +44,17 @@ const ModernAuthForm: React.FC<ModernAuthFormProps> = ({ mode = 'login', onSucce
     setLoading(true);
     try {
       if (mode === 'signup') {
+        const unique = await checkUsernameUnique(username);
+        if (!unique) {
+          setLoading(false);
+          return;
+        }
         const userCred = await createUserWithEmailAndPassword(auth, email, password);
         if (name) {
           await updateProfile(userCred.user, { displayName: name });
         }
+        // Save username in Firestore
+        await setDoc(doc(db, 'users', userCred.user.uid), { username }, { merge: true });
       } else {
         await signInWithEmailAndPassword(auth, email, password);
       }
@@ -101,14 +125,34 @@ const ModernAuthForm: React.FC<ModernAuthFormProps> = ({ mode = 'login', onSucce
       {tab === 'email' && (
         <form onSubmit={handleEmailAuth} className="space-y-4">
           {mode === 'signup' && (
-            <input
-              type="text"
-              placeholder="Name"
-              value={name}
-              onChange={e => setName(e.target.value)}
-              className="w-full border rounded px-3 py-2"
-              required
-            />
+            <>
+              <input
+                type="text"
+                placeholder="Username"
+                value={username}
+                onChange={e => setUsername(e.target.value)}
+                onBlur={e => checkUsernameUnique(e.target.value)}
+                className="w-full border rounded px-3 py-2"
+                required
+              />
+              {usernameError && <div className="text-red-600 text-sm">{usernameError}</div>}
+              <input
+                type="text"
+                placeholder="Name"
+                value={name}
+                onChange={e => setName(e.target.value)}
+                className="w-full border rounded px-3 py-2"
+                required
+              />
+              <input
+                type="tel"
+                placeholder="Phone Number"
+                value={phone}
+                onChange={e => setPhone(e.target.value)}
+                className="w-full border rounded px-3 py-2"
+                required
+              />
+            </>
           )}
           <input
             type="email"

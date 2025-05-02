@@ -3,8 +3,12 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Menu, X, ChevronDown, User as UserIcon } from 'lucide-react';
 import { Button } from './ui/button';
 import ModernAuthForm from './ModernAuthForm';
-import { auth } from '../firebase';
+import { auth, db } from '../firebase';
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
+import { doc, getDoc } from 'firebase/firestore';
+import NotificationBell from './NotificationBell';
+
+const ADMIN_EMAILS = ['yogeshwara49@gmail.com'];
 
 const Navbar = () => {
   const [isOpen, setIsOpen] = useState(false);
@@ -13,6 +17,8 @@ const Navbar = () => {
   const [authModal, setAuthModal] = useState<{ open: boolean; mode: 'signup' | 'login' }>({ open: false, mode: 'signup' });
   const [user, setUser] = useState<User | null>(null);
   const [profileDropdown, setProfileDropdown] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [userName, setUserName] = useState<string | null>(null);
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -41,6 +47,27 @@ const Navbar = () => {
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [profileDropdown]);
+
+  useEffect(() => {
+    if (!user) {
+      setUserName(null);
+      return;
+    }
+    // Try to get name from Firestore
+    const fetchName = async () => {
+      try {
+        const userDoc = await getDoc(doc(db, 'users', user.uid));
+        if (userDoc.exists() && userDoc.data().name) {
+          setUserName(userDoc.data().name);
+        } else {
+          setUserName(user.displayName || user.email || 'Account');
+        }
+      } catch {
+        setUserName(user.displayName || user.email || 'Account');
+      }
+    };
+    fetchName();
+  }, [user]);
 
   const scrollToTop = () => {
     if (location.pathname !== '/') {
@@ -189,7 +216,7 @@ const Navbar = () => {
 
               {/* Auth Button or User Info */}
               {user ? (
-                <div className="relative profile-dropdown-parent">
+                <div className="relative profile-dropdown-parent flex items-center gap-2">
                   <button
                     className={`ml-4 flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-all duration-200 ${
                       shouldBeTransparent
@@ -199,26 +226,67 @@ const Navbar = () => {
                     onClick={() => setProfileDropdown((v) => !v)}
                   >
                     <UserIcon className="w-5 h-5" />
-                    {user.displayName || user.email}
+                    {userName || user.displayName || user.email || 'Account'}
                   </button>
                   {profileDropdown && (
-                    <div className="absolute right-0 mt-2 w-56 bg-white rounded-xl shadow-lg border z-50 text-gray-700 overflow-hidden">
-                      <button className="w-full text-left px-5 py-3 hover:bg-blue-50" onClick={() => { navigate('/profile'); setProfileDropdown(false); }}>Profile</button>
-                      <button className="w-full text-left px-5 py-3 hover:bg-blue-50" onClick={() => setProfileDropdown(false)}>Promos</button>
-                      <button className="w-full text-left px-5 py-3 hover:bg-blue-50" onClick={() => { navigate('/help-support'); setProfileDropdown(false); }}>Help & Support</button>
-                      <button className="w-full text-left px-5 py-3 hover:bg-blue-50" onClick={() => setProfileDropdown(false)}>Terms & Condition</button>
-                      <button className="w-full text-left px-5 py-3 hover:bg-blue-50 text-red-600" onClick={() => { signOut(auth); setProfileDropdown(false); }}>Logout</button>
+                    <div className="absolute right-0 top-full w-48 bg-white rounded-xl shadow-lg py-2 z-60 border border-gray-100">
+                      <Link
+                        to="/profile"
+                        className="block px-6 py-3 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                        onClick={() => setProfileDropdown(false)}
+                      >
+                        Profile
+                      </Link>
+                      <Link
+                        to="/dashboard"
+                        className="block px-6 py-3 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                        onClick={() => setProfileDropdown(false)}
+                      >
+                        Dashboard
+                      </Link>
+                      {ADMIN_EMAILS.includes(user?.email) && (
+                        <Link
+                          to="/admin"
+                          className="block px-6 py-3 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                          onClick={() => setProfileDropdown(false)}
+                        >
+                          Admin Dashboard
+                        </Link>
+                      )}
+                      <button
+                        className="block w-full text-left px-6 py-3 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                        onClick={async () => {
+                          await signOut(auth);
+                          setProfileDropdown(false);
+                          navigate('/');
+                        }}
+                      >
+                        Logout
+                      </button>
                     </div>
                   )}
                 </div>
               ) : (
-                <button
-                  className="ml-4 px-4 py-2 rounded-full bg-blue-600 text-white hover:bg-blue-700 transition"
-                  onClick={() => setAuthModal({ open: true, mode: 'login' })}
-                >
-                  Login / Sign Up
-                </button>
+                <div className="flex gap-2 ml-4 items-center">
+                  <Button
+                    className="px-4 py-2 rounded-full text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
+                    onClick={() => setAuthModal({ open: true, mode: 'login' })}
+                  >
+                    Login
+                  </Button>
+                  <Button
+                    className="px-4 py-2 rounded-full text-sm font-medium border border-blue-600 text-blue-600 bg-white hover:bg-blue-50 transition"
+                    onClick={() => setAuthModal({ open: true, mode: 'signup' })}
+                  >
+                    Sign Up
+                  </Button>
+                </div>
               )}
+
+              {/* Notification Bell at the end */}
+              <div className="ml-4 flex items-center">
+                <NotificationBell shouldBeTransparent={shouldBeTransparent} />
+              </div>
             </div>
 
             {/* Mobile menu button */}
@@ -317,25 +385,61 @@ const Navbar = () => {
                     onClick={() => setProfileDropdown((v) => !v)}
                   >
                     <UserIcon className="w-5 h-5 mr-2" />
-                    {user.displayName || user.email}
+                    {userName || user.displayName || user.email || 'Account'}
                   </button>
                   {profileDropdown && (
-                    <div className="absolute right-0 mt-2 w-56 bg-white rounded-xl shadow-lg border z-50 text-gray-700 overflow-hidden">
-                      <button className="w-full text-left px-5 py-3 hover:bg-blue-50" onClick={() => { navigate('/profile'); setProfileDropdown(false); }}>Profile</button>
-                      <button className="w-full text-left px-5 py-3 hover:bg-blue-50" onClick={() => setProfileDropdown(false)}>Promos</button>
-                      <button className="w-full text-left px-5 py-3 hover:bg-blue-50" onClick={() => { navigate('/help-support'); setProfileDropdown(false); }}>Help & Support</button>
-                      <button className="w-full text-left px-5 py-3 hover:bg-blue-50" onClick={() => setProfileDropdown(false)}>Terms & Condition</button>
-                      <button className="w-full text-left px-5 py-3 hover:bg-blue-50 text-red-600" onClick={() => { signOut(auth); setProfileDropdown(false); }}>Logout</button>
+                    <div className="absolute right-0 top-full w-48 bg-white rounded-xl shadow-lg py-2 z-60 border border-gray-100">
+                      <Link
+                        to="/profile"
+                        className="block px-6 py-3 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                        onClick={() => setProfileDropdown(false)}
+                      >
+                        Profile
+                      </Link>
+                      <Link
+                        to="/dashboard"
+                        className="block px-6 py-3 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                        onClick={() => setProfileDropdown(false)}
+                      >
+                        Dashboard
+                      </Link>
+                      {ADMIN_EMAILS.includes(user?.email) && (
+                        <Link
+                          to="/admin"
+                          className="block px-6 py-3 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                          onClick={() => setProfileDropdown(false)}
+                        >
+                          Admin Dashboard
+                        </Link>
+                      )}
+                      <button
+                        className="block w-full text-left px-6 py-3 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                        onClick={async () => {
+                          await signOut(auth);
+                          setProfileDropdown(false);
+                          navigate('/');
+                        }}
+                      >
+                        Logout
+                      </button>
                     </div>
                   )}
                 </div>
               ) : (
-                <button
-                  className="w-full mt-2 px-4 py-3 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
-                  onClick={() => { setAuthModal({ open: true, mode: 'login' }); setIsOpen(false); }}
-                >
-                  Login / Sign Up
-                </button>
+                <div className="flex gap-2 mt-2">
+                  <Button
+                    className="px-4 py-2 rounded-full text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
+                    onClick={() => setAuthModal({ open: true, mode: 'login' })}
+                  >
+                    Login
+                  </Button>
+                  <Button
+                    className="px-4 py-2 rounded-full text-sm font-medium border border-blue-600 text-blue-600 bg-white hover:bg-blue-50 transition"
+                    onClick={() => setAuthModal({ open: true, mode: 'signup' })}
+                  >
+                    Sign Up
+                  </Button>
+                </div>
               )}
             </div>
           </div>
@@ -344,18 +448,21 @@ const Navbar = () => {
 
       {/* Auth Modal */}
       {authModal.open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl shadow-lg p-6 min-w-[350px] relative">
-            <button
-              className="absolute top-2 right-2 text-gray-400 hover:text-gray-700 text-2xl"
-              onClick={() => setAuthModal({ ...authModal, open: false })}
-            >
-              &times;
-            </button>
-            <ModernAuthForm
-              mode={authModal.mode}
-              onSuccess={() => setAuthModal({ ...authModal, open: false })}
-            />
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setAuthModal({ open: false, mode: 'login' })}>
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-sm w-full relative" onClick={e => e.stopPropagation()}>
+            <button className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl" onClick={() => setAuthModal({ open: false, mode: 'login' })} aria-label="Close">×</button>
+            <div className="flex flex-col items-center mb-4">
+              <span className="text-3xl font-bold text-blue-700 mb-2">Washitek</span>
+              <span className="text-lg font-semibold text-gray-700 mb-2">{authModal.mode === 'login' ? 'Login to your account' : 'Create your account'}</span>
+            </div>
+            <ModernAuthForm mode={authModal.mode} onSuccess={() => setAuthModal({ open: false, mode: 'login' })} />
+            <div className="mt-4 text-center text-sm">
+              {authModal.mode === 'login' ? (
+                <>Don&apos;t have an account? <button className="text-blue-600 hover:underline" onClick={() => setAuthModal({ open: true, mode: 'signup' })}>Sign Up</button></>
+              ) : (
+                <>Already have an account? <button className="text-blue-600 hover:underline" onClick={() => setAuthModal({ open: true, mode: 'login' })}>Login</button></>
+              )}
+            </div>
           </div>
         </div>
       )}

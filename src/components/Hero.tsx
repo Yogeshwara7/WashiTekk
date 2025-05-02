@@ -2,6 +2,7 @@ import React from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Button } from './ui/button';
 import { ChevronDown } from 'lucide-react';
+import BookingModal from './BookingModal';
 
 const Hero = () => {
   const navigate = useNavigate();
@@ -49,13 +50,7 @@ const Hero = () => {
           Your clothes deserve the best care!
         </p>
         <div className="flex flex-col sm:flex-row gap-4 justify-center items-center animate-fade-in-delay-2">
-          <Button
-            onClick={() => navigate('/contact')}
-            size="lg"
-            className="bg-primary hover:bg-primary/90 text-white px-8"
-          >
-            Book Now
-          </Button>
+          <BookingModal />
           <Button
             onClick={scrollToServices}
             variant="outline"
