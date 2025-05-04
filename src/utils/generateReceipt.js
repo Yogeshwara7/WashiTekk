@@ -170,8 +170,11 @@ export async function generateReceipt(payment, user, dashboard, signatureBase64,
     y = tableY + rowHeight * (payment.items.length + 1) + 4;
   } else {
     const valueY = tableY + rowHeight + 8;
-    doc.text(`${payment.plan || dashboard?.planName || ''}`, tableX + 6, valueY);
-    doc.text(`${dashboard?.planDuration || ''}`, tableX + colWidths[0] + 6, valueY);
+    // Fallbacks for no-plan users
+    const planValue = payment.plan || dashboard?.planName || 'One-time Service';
+    const durationValue = dashboard?.planDuration || 'N/A';
+    doc.text(`${planValue}`, tableX + 6, valueY);
+    doc.text(`${durationValue}`, tableX + colWidths[0] + 6, valueY);
     doc.setFont(undefined, 'bold');
     doc.text(`Rs. ${payment.amount || payment.price || dashboard?.planPrice || ''}`, tableX + colWidths[0] + colWidths[1] + 6, valueY);
     doc.setFont(undefined, 'normal');

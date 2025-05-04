@@ -35,63 +35,30 @@ const NotificationBell: React.FC<NotificationBellProps> = ({ shouldBeTransparent
   }, [dropdownOpen]);
 
   useEffect(() => {
-    // Feedback notifications
-    const unsub1 = onSnapshot(collection(db, 'contact_messages'), (snap) => {
-      const feedbackNotifs = snap.docs.map(doc => ({
-        type: 'feedback',
-        id: doc.id,
-        ...doc.data()
-      }));
-      setNotifications(current => {
-        const others = current.filter(n => n.type !== 'feedback');
-        const merged = [...others, ...feedbackNotifs];
-        const unique = Array.from(new Map(merged.map(n => [n.type + n.id, n])).values());
-        return unique;
+    if (!auth.currentUser) return;
+    const isAdmin = ADMIN_EMAILS.includes(auth.currentUser.email || '');
+
+    let unsubscribes: (() => void)[] = [];
+
+    if (isAdmin) {
+      // Admin: fetch from admin_notifications
+      const unsub = onSnapshot(collection(db, 'admin_notifications'), (snap) => {
+        setNotifications(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
       });
-    });
-    // Payment notifications
-    const unsub2 = onSnapshot(collection(db, 'users'), (snap) => {
-      let paymentNotifs: any[] = [];
-      snap.docs.forEach(docSnap => {
-        const after = docSnap.data();
-        if (Array.isArray(after.payments)) {
-          after.payments.forEach((payment, idx) => {
-            paymentNotifs.push({
-              type: 'payment',
-              id: docSnap.id + '_' + idx,
-              name: after.name || after.email,
-              amount: payment.amount
-            });
-          });
+      unsubscribes = [unsub];
+    } else {
+      // Normal user: fetch from users/{uid}/notifications
+      const unsub = onSnapshot(
+        collection(db, 'users', auth.currentUser.uid, 'notifications'),
+        (snap) => {
+          setNotifications(snap.docs.map(d => ({ id: d.id, ...d.data() })));
         }
-      });
-      setNotifications(current => {
-        const others = current.filter(n => n.type !== 'payment');
-        const merged = [...others, ...paymentNotifs];
-        const unique = Array.from(new Map(merged.map(n => [n.type + n.id, n])).values());
-        return unique;
-      });
-    });
-    // Booking notifications
-    const unsub3 = onSnapshot(collection(db, 'bookings'), (snap) => {
-      const bookingNotifs = snap.docs.map(doc => {
-        const booking = doc.data();
-        return {
-          type: 'booking',
-          id: doc.id,
-          name: booking.name || booking.email,
-          service: booking.service
-        };
-      });
-      setNotifications(current => {
-        const others = current.filter(n => n.type !== 'booking');
-        const merged = [...others, ...bookingNotifs];
-        const unique = Array.from(new Map(merged.map(n => [n.type + n.id, n])).values());
-        return unique;
-      });
-    });
-    return () => { unsub1(); unsub2(); unsub3(); };
-  }, []);
+      );
+      unsubscribes = [unsub];
+    }
+
+    return () => unsubscribes.forEach(unsub => unsub());
+  }, [auth.currentUser]);
 
   useEffect(() => {
     setUnreadCount(notifications.filter(n => !n.read).length);
@@ -217,11 +184,13 @@ const NotificationBell: React.FC<NotificationBellProps> = ({ shouldBeTransparent
                 onClick={() => handleNotificationClick(n)}
               >
                 {n.type === 'feedback' ? (
-                  <span>New feedback from <b>{n.name}</b>: <i>{n.subject}</i></span>
+                  <span>New feedback from <b>{n.name || n.userName || n.from || 'Unknown'}</b>: <i>{n.subject || ''}</i></span>
                 ) : n.type === 'payment' ? (
-                  <span>New payment from <b>{n.name}</b>: ₹{n.amount}</span>
+                  <span>New payment from <b>{n.name || n.userName || n.from || 'Unknown'}</b>: ₹{n.amount}</span>
                 ) : n.type === 'booking' ? (
-                  <span>New booking from <b>{n.name}</b>: <i>{n.service}</i></span>
+                  (n.name || n.service || n.userName || n.serviceType)
+                    ? <span>New booking from <b>{n.name || n.userName || n.from || 'Unknown'}</b>{(n.service || n.serviceType) ? `: ${n.service || n.serviceType}` : ''}</span>
+                    : <span>{n.body}</span>
                 ) : null}
               </div>
             ))

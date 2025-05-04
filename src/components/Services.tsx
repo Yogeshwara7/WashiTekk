@@ -95,32 +95,32 @@ const Services = () => {
               transitionDuration={0.35}
               front={
                 <div className={`flex flex-col items-center justify-between h-full py-8 px-6 ${cardColors[index]} ${cardTextColors[index]}`}>
-                  <div className="flex items-center justify-between w-full mb-6">
-                    <span className="font-extrabold text-xl tracking-wide drop-shadow">{service.title.toUpperCase()}</span>
-                    <span className="ml-2 bg-brand-card/20 rounded-full p-1 flex items-center justify-center">
-                      <svg width="28" height="28" fill="none" viewBox="0 0 24 24" stroke="currentColor" className="text-brand-headline"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" /></svg>
-                    </span>
+                    <div className="flex items-center justify-between w-full mb-6">
+                      <span className="font-extrabold text-xl tracking-wide drop-shadow">{service.title.toUpperCase()}</span>
+                      <span className="ml-2 bg-brand-card/20 rounded-full p-1 flex items-center justify-center">
+                        <svg width="28" height="28" fill="none" viewBox="0 0 24 24" stroke="currentColor" className="text-brand-headline"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" /></svg>
+                      </span>
+                    </div>
+                    <div className="flex-1 flex items-center justify-center mb-6">
+                      <service.icon className="w-24 h-24 opacity-90" />
+                    </div>
+                    <div className="font-semibold text-lg text-center tracking-wide mt-auto mb-2">
+                      {service.price}
+                    </div>
                   </div>
-                  <div className="flex-1 flex items-center justify-center mb-6">
-                    <service.icon className="w-24 h-24 opacity-90" />
-                  </div>
-                  <div className="font-semibold text-lg text-center tracking-wide mt-auto mb-2">
-                    {service.price}
-                  </div>
-                </div>
               }
               back={
                 <div className={`flex flex-col justify-center items-center h-full p-8 ${cardColors[index]} ${cardTextColors[index]}`}>
-                  <div className="mb-6 text-brand-cardparagraph text-center text-base font-medium leading-relaxed">
-                    {service.description}
-                  </div>
-                  <button
+                    <div className="mb-6 text-brand-cardparagraph text-center text-base font-medium leading-relaxed">
+                      {service.description}
+                    </div>
+                    <button
                     className="mt-4 px-6 py-2 bg-white text-brand-cardheading border border-brand-cardheading rounded-lg hover:bg-brand-highlight hover:text-brand-background transition font-semibold shadow"
-                    onClick={e => { e.stopPropagation(); handleNavigate(service.link); }}
-                  >
-                    Go to Service
-                  </button>
-                </div>
+                      onClick={e => { e.stopPropagation(); handleNavigate(service.link); }}
+                    >
+                      Go to Service
+                    </button>
+                  </div>
               }
             />
           ))}

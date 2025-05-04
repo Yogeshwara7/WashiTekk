@@ -270,8 +270,8 @@ const Navbar = () => {
                 <div className="flex gap-2 ml-4 items-center">
                   <Button
                     className="px-4 py-2 rounded-full text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
-                    onClick={() => setAuthModal({ open: true, mode: 'login' })}
-                  >
+                  onClick={() => setAuthModal({ open: true, mode: 'login' })}
+                >
                     Login
                   </Button>
                   <Button
@@ -436,7 +436,7 @@ const Navbar = () => {
                   <Button
                     className="px-4 py-2 rounded-full text-sm font-medium border border-blue-600 text-blue-600 bg-white hover:bg-blue-50 transition"
                     onClick={() => setAuthModal({ open: true, mode: 'signup' })}
-                  >
+                >
                     Sign Up
                   </Button>
                 </div>

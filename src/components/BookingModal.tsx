@@ -16,6 +16,38 @@ type UserExtraInfo = {
   address?: string;
 };
 
+// 1. Define services and their plans
+const services = [
+  {
+    name: "Wash & Fold",
+    plans: [
+      { name: "Basic", price: 100, description: "Up to 5kg" },
+      { name: "Premium", price: 180, description: "Up to 10kg" }
+    ]
+  },
+  {
+    name: "Wash & Iron",
+    plans: [
+      { name: "Standard", price: 150, description: "Up to 5kg" },
+      { name: "Deluxe", price: 250, description: "Up to 10kg" }
+    ]
+  },
+  {
+    name: "Dry Cleaning",
+    plans: [
+      { name: "Regular", price: 200, description: "Per item" },
+      { name: "Express", price: 350, description: "Faster delivery" }
+    ]
+  },
+  {
+    name: "Steam Press",
+    plans: [
+      { name: "Normal", price: 80, description: "Up to 5kg" },
+      { name: "Bulk", price: 140, description: "Up to 10kg" }
+    ]
+  }
+];
+
 const initialForm = {
   name: '',
   phone: '',
@@ -24,6 +56,7 @@ const initialForm = {
   pickupDate: '',
   pickupTime: '',
   service: '',
+  plan: '',
   instructions: '',
 };
 
@@ -68,19 +101,30 @@ export default function BookingModal() {
     setForm({ ...form, [e.target.name]: e.target.value });
   };
 
+  const selectedServiceObj = services.find(s => s.name === form.service);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     // Simple validation
-    if (!form.name || !form.phone || !form.address || !form.pickupDate || !form.service) {
+    if (!form.name || !form.phone || !form.address || !form.pickupDate || !form.service || !form.plan) {
       setError('Please fill all required fields.');
       return;
     }
     setError('');
     try {
-      await addDoc(collection(db, 'bookings'), {
+      const bookingRef = await addDoc(collection(db, 'bookings'), {
         ...form,
         createdAt: Timestamp.now(),
         status: 'pending',
+      });
+      // Admin notification for new booking
+      await addDoc(collection(db, 'admin_notifications'), {
+        title: 'New Booking',
+        body: `New booking from ${form.name} for ${form.service} (${form.plan}).`,
+        type: 'booking',
+        bookingId: bookingRef.id,
+        read: false,
+        createdAt: Timestamp.now(),
       });
       setSubmitted(true);
     } catch (err) {
@@ -139,18 +183,37 @@ export default function BookingModal() {
               </div>
               <div>
                 <label className="block mb-1 font-medium">Service Type *</label>
-                <Select value={form.service} onValueChange={val => handleChange({ target: { name: 'service', value: val } })}>
+                <Select value={form.service} onValueChange={val => {
+                  setForm(f => ({ ...f, service: val, plan: '' }));
+                }}>
                   <SelectTrigger>
                     <SelectValue placeholder="Select" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="Wash & Fold">Wash & Fold</SelectItem>
-                    <SelectItem value="Wash & Iron">Wash & Iron</SelectItem>
-                    <SelectItem value="Dry Cleaning">Dry Cleaning</SelectItem>
-                    <SelectItem value="Steam Press">Steam Press</SelectItem>
+                    {services.map(service => (
+                      <SelectItem key={service.name} value={service.name}>{service.name}</SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
+              {/* Plan selection dropdown, shown only if a service is selected */}
+              {selectedServiceObj && (
+                <div>
+                  <label className="block mb-1 font-medium">Plan *</label>
+                  <Select value={form.plan} onValueChange={val => setForm(f => ({ ...f, plan: val }))}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select Plan" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {selectedServiceObj.plans.map(plan => (
+                        <SelectItem key={plan.name} value={plan.name}>
+                          {plan.name} - ₹{plan.price} ({plan.description})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
             </div>
             <div>
               <label className="block mb-1 font-medium">Pickup Address *</label>

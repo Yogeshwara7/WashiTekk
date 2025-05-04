@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { auth, db } from '../firebase';
 import { onAuthStateChanged } from 'firebase/auth';
-import { collection, getDocs, doc, updateDoc, deleteDoc, updateDoc as updateContactDoc, onSnapshot, addDoc } from 'firebase/firestore';
+import { collection, getDocs, doc, updateDoc, deleteDoc, updateDoc as updateContactDoc, onSnapshot, addDoc, getDoc } from 'firebase/firestore';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
@@ -15,6 +15,9 @@ import { ChartContainer } from '../components/ui/chart';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, BarChart, Bar, PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { Modal } from '../components/ui/modal';
 import { nanoid } from 'nanoid';
+import { toast } from 'react-toastify';
+import TabSortOptions from '../components/TabSortOptions';
+import { sortUsers, sortBookings, sortHistory, sortFeedback } from '../utils/sortUtils';
 
 // List of admin emails (replace with your admin email(s))
 const ADMIN_EMAILS = ['yogeshwara49@gmail.com'];
@@ -530,6 +533,8 @@ const AdminDashboard = () => {
           title: 'Booking Accepted',
           body: `Your booking for ${booking.service} has been accepted! We'll update the usage after processing.`,
           type: 'booking',
+          name: booking.name || '',
+          service: booking.service || '',
           read: false,
           createdAt: Timestamp.now(),
         });
@@ -540,15 +545,20 @@ const AdminDashboard = () => {
 
   // Add new function to update usage after weighing
   const handleUpdateUsage = (booking) => {
+    // Try to find the user by username or email
+    const user = users.find(
+      u => u.name === booking.username || u.email === booking.email
+    );
     setUsageModal({ 
       open: true, 
-      user: { 
-        id: booking.userId,
-        planName: booking.planName,
-        planKG: booking.planKG,
-        planBalance: booking.planBalance,
-        email: booking.email
-      }, 
+      user: user ? { 
+        id: user.id,
+        planName: user.planName,
+        planKG: user.planKG,
+        planBalance: user.planBalance,
+        email: user.email,
+        name: user.name
+      } : null,
       value: '',
       bookingId: booking.id
     });
@@ -556,23 +566,44 @@ const AdminDashboard = () => {
 
   // Reject booking
   const handleRejectBooking = async (booking, reason) => {
+    console.log('[RejectBooking] Called with:', booking, reason);
     setBookingActionLoading(booking.id);
-    await updateDoc(doc(db, 'bookings', booking.id), { status: 'rejected', rejectReason: reason });
-    setBookings(bks => bks.map(b => b.id === booking.id ? { ...b, status: 'rejected', rejectReason: reason } : b));
-    // Add notification to user
-    if (booking.email) {
-      const notifRef = collection(db, 'users');
-      const userSnap = await getDocs(notifRef);
-      const userDoc = userSnap.docs.find(u => u.data().email === booking.email);
-      if (userDoc) {
-        await addDoc(collection(db, 'users', userDoc.id, 'notifications'), {
-          title: 'Booking Rejected',
-          body: `Your booking for ${booking.service} was rejected.${reason ? ' Reason: ' + reason : ''}`,
-          type: 'booking',
-          read: false,
-          createdAt: Timestamp.now(),
-        });
+    try {
+      if (!booking || !booking.id) {
+        console.error('[RejectBooking] Invalid booking object:', booking);
+        alert('Error: Invalid booking object.');
+        setBookingActionLoading('');
+        return;
       }
+      await updateDoc(doc(db, 'bookings', booking.id), { status: 'rejected', rejectReason: reason });
+      setBookings(bks => bks.map(b => b.id === booking.id ? { ...b, status: 'rejected', rejectReason: reason } : b));
+      // Add notification to user
+      if (booking.email) {
+        try {
+          const notifRef = collection(db, 'users');
+          const userSnap = await getDocs(notifRef);
+          const userDoc = userSnap.docs.find(u => u.data().email === booking.email);
+          if (userDoc) {
+            await addDoc(collection(db, 'users', userDoc.id, 'notifications'), {
+              title: 'Booking Rejected',
+              body: `Your booking for ${booking.service} was rejected.${reason ? ' Reason: ' + reason : ''}`,
+              type: 'booking',
+              read: false,
+              createdAt: Timestamp.now(),
+            });
+          } else {
+            console.warn('[RejectBooking] No user found for email:', booking.email);
+          }
+        } catch (notifErr) {
+          console.error('[RejectBooking] Error adding notification:', notifErr);
+          alert('Error adding notification to user. See console for details.');
+        }
+      } else {
+        console.warn('[RejectBooking] Booking has no email:', booking);
+      }
+    } catch (err) {
+      console.error('[RejectBooking] Error updating booking:', err);
+      alert('Error rejecting booking. See console for details.');
     }
     setBookingActionLoading('');
     setShowRejectModal({ open: false, booking: null });
@@ -653,37 +684,66 @@ const AdminDashboard = () => {
 
   const handleApproveRequest = async (user) => {
     const userRef = doc(db, 'users', user.id);
-    // Update user plan fields
-    await updateDoc(userRef, {
+
+    // Determine plan type
+    const isElitePlus = user.planRequest.plan === 'Elite Plus';
+
+    // Build update object
+    const updateObj: any = {
       planName: user.planRequest.plan,
       planPrice: user.planRequest.price,
       planDuration: user.planRequest.duration,
       planStatus: 'Active',
-      planKG: user.planRequest.kgLimit,
       planConditioner: user.planRequest.conditioner || '',
       planPaymentMethod: user.planRequest.paymentMethod,
       planTxnId: user.planRequest.txnId || '',
       planActivatedAt: new Date().toISOString(),
-      planRequest: { ...user.planRequest, status: 'approved', approvedAt: new Date().toISOString() }
-    });
+      planRequest: { ...user.planRequest, status: 'approved', approvedAt: new Date().toISOString() },
+      planKG: undefined,
+      usage: undefined,
+      amountUsed: undefined,
+    };
+
+    if (isElitePlus) {
+      updateObj.planKG = user.planRequest.kgLimit;
+      updateObj.usage = 0;
+      updateObj.amountUsed = 0;
+    } else {
+      updateObj.planKG = 0;
+      updateObj.usage = 0;
+      updateObj.amountUsed = 0;
+    }
+
+    await updateDoc(userRef, updateObj);
+
+    // Add payment entry
+    const userSnap = await getDoc(userRef);
+    const prevPayments = userSnap.exists() ? (userSnap.data().payments || []) : [];
+    const newPayment = {
+      date: new Date().toLocaleString(),
+      amount: user.planRequest.price,
+      status: 'Success',
+    };
+    await updateDoc(userRef, { payments: [...prevPayments, newPayment] });
+
     // Add to bookings collection
     await addDoc(collection(db, 'bookings'), {
-      userId: user.id,
-      name: user.name,
+      userId: user.id || '',
+      name: user.name || user.email || 'Unknown',
       username: user.username || '',
-      email: user.email,
-      planName: user.planRequest.plan,
-      planPrice: user.planRequest.price,
-      planDuration: user.planRequest.duration,
-      planKG: user.planRequest.kgLimit,
-      planConditioner: user.planRequest.conditioner || '',
-      planPaymentMethod: user.planRequest.paymentMethod,
-      planTxnId: user.planRequest.txnId || '',
+      email: user.email || '',
+      planName: user.planRequest?.plan || '',
+      planPrice: user.planRequest?.price || 0,
+      planDuration: user.planRequest?.duration || '',
+      planKG: isElitePlus ? (user.planRequest?.kgLimit || 0) : 0,
+      planConditioner: user.planRequest?.conditioner || '',
+      planPaymentMethod: user.planRequest?.paymentMethod || '',
+      planTxnId: user.planRequest?.txnId || '',
       status: 'accepted',
       createdAt: new Date(),
-      customBookingId: nanoid(8), // Secure, short custom ID for display/search
-      // ...add other fields as needed
+      customBookingId: nanoid(8),
     });
+
     // Add notification
     await addDoc(collection(db, 'users', user.id, 'notifications'), {
       title: 'Request Approved',
@@ -692,6 +752,7 @@ const AdminDashboard = () => {
       read: false,
       createdAt: Timestamp.now(),
     });
+
     setPlanRequests(reqs => reqs.map(u2 => u2.id === user.id ? { ...u2, planRequest: { ...u2.planRequest, status: 'approved', approvedAt: new Date().toISOString() } } : u2));
   };
   const handleRejectPlanRequest = async (user, reason) => {
@@ -738,28 +799,35 @@ const AdminDashboard = () => {
     const bookingRef = doc(db, 'bookings', usageModal.bookingId);
 
     try {
-      // Update user's remaining balance
+      // Update user's usage or amountUsed field
       if (usageModal.user.planName === 'Elite Plus') {
-        const newKG = (usageModal.user.planKG || 0) - Number(usageModal.value);
-        await updateDoc(userRef, { planKG: newKG });
+        // KG-based plan: increment usage
+        const userSnap = await getDoc(userRef);
+        const prevUsage = userSnap.exists() ? (userSnap.data().usage || 0) : 0;
+        const newUsage = prevUsage + Number(usageModal.value);
+        await updateDoc(userRef, { usage: newUsage });
       } else {
-        const newBalance = (usageModal.user.planBalance || 0) - Number(usageModal.value);
-        await updateDoc(userRef, { planBalance: newBalance });
+        // Amount-based plan: increment amountUsed
+        const userSnap = await getDoc(userRef);
+        const prevAmount = userSnap.exists() ? (userSnap.data().amountUsed || 0) : 0;
+        const newAmount = prevAmount + Number(usageModal.value);
+        await updateDoc(userRef, { amountUsed: newAmount });
       }
 
       // Update booking status and add usage
       await updateDoc(bookingRef, {
-        status: 'accepted',
+        status: 'awaiting_payment',
         usage: Number(usageModal.value),
-        acceptedAt: new Date().toISOString()
+        amountDue: Number(usageModal.value),
+        acceptedAt: new Date().toISOString(),
       });
 
       // Update local state
       setBookings(bks => bks.map(b => b.id === usageModal.bookingId ? {
         ...b,
-        status: 'accepted',
+        status: 'awaiting_payment',
         usage: Number(usageModal.value),
-        acceptedAt: new Date().toISOString()
+        acceptedAt: new Date().toISOString(),
       } : b));
 
       // Add notification to user
@@ -772,6 +840,8 @@ const AdminDashboard = () => {
             title: 'Booking Usage Updated',
             body: `Your booking usage has been updated: ${usageModal.value} ${usageModal.user.planName === 'Elite Plus' ? 'KG' : '₹'} has been deducted from your balance.`,
             type: 'booking',
+            name: usageModal.user.name || '',
+            service: '',
             read: false,
             createdAt: Timestamp.now(),
           });
@@ -832,6 +902,102 @@ const AdminDashboard = () => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [notifDropdownOpen]);
 
+  const [adminNotifications, setAdminNotifications] = useState([]);
+
+  // Fetch admin notifications in real-time
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'admin_notifications'), (snap) => {
+      setAdminNotifications(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+    return () => unsub();
+  }, []);
+
+  const handleAdminNotifClick = async (notif) => {
+    // Mark as read in Firestore
+    await updateDoc(doc(db, 'admin_notifications', notif.id), { read: true });
+    setAdminNotifications(nots => nots.map(n => n.id === notif.id ? { ...n, read: true } : n));
+    // Navigate to relevant tab
+    if (notif.type === 'booking') setTab('bookings');
+    else if (notif.type === 'payment') setTab('bookings');
+    else if (notif.type === 'feedback') setTab('feedback');
+    // Add more types as needed
+  };
+
+  useEffect(() => {
+    console.log('[Modal State Changed]', showRejectModal);
+  }, [showRejectModal]);
+
+  const [addPaymentModal, setAddPaymentModal] = useState({ open: false, user: null });
+  const [addPaymentAmount, setAddPaymentAmount] = useState('');
+  const [addPaymentStatus, setAddPaymentStatus] = useState('Success');
+
+  const handleAddPaymentManually = () => {
+    setUsers(users => users.map(u => u.id === addPaymentModal.user.id ? { ...u, payments: [...u.payments, { date: new Date().toLocaleString(), amount: addPaymentAmount, status: addPaymentStatus }] } : u));
+    setAddPaymentModal({ open: false, user: null });
+    setAddPaymentAmount('');
+    setAddPaymentStatus('Success');
+  };
+
+  // Add the fix3000PlanPayments function
+  const fix3000PlanPayments = async () => {
+    const affectedUsers = users.filter(u => Number(u.planPrice) === 3000 && (!u.payments || u.payments.length === 0));
+    for (const u of affectedUsers) {
+      const userRef = doc(db, 'users', u.id);
+      const newPayment = {
+        date: new Date().toLocaleString(),
+        amount: 3000,
+        status: 'Success',
+      };
+      await updateDoc(userRef, { payments: [newPayment] });
+      setUsers(users => users.map(user => user.id === u.id ? { ...user, payments: [newPayment] } : user));
+    }
+    alert(`Fixed payments for ${affectedUsers.length} user(s) with ₹3000 plan.`);
+  };
+
+  const handleSetAmountDue = async () => {
+    if (!usageModal.bookingId) {
+      alert('Booking not found!');
+      return;
+    }
+    const bookingRef = doc(db, 'bookings', usageModal.bookingId);
+    try {
+      // For users with no plan, keep in Bookings tab with awaiting_payment status
+      await updateDoc(bookingRef, {
+        status: 'awaiting_payment',
+        amountDue: Number(usageModal.value),
+        acceptedAt: new Date().toISOString(),
+        isNoPlanBooking: true // Add flag to identify no-plan bookings
+      });
+      
+      // Update local state - keep in Bookings tab
+      setBookings(bks => bks.map(b => b.id === usageModal.bookingId ? {
+        ...b,
+        status: 'awaiting_payment',
+        amountDue: Number(usageModal.value),
+        acceptedAt: new Date().toISOString(),
+        isNoPlanBooking: true
+      } : b));
+      
+      setUsageModal({ open: false, user: null, value: '', bookingId: null });
+      toast.success('Amount due set! Booking will remain in Bookings tab until payment is received.');
+    } catch (error) {
+      console.error('Error setting amount due:', error);
+      toast.error('Error setting amount due. Please try again.');
+    }
+  };
+
+  const [userSortOrder, setUserSortOrder] = useState('recent');
+  const [bookingSortOrder, setBookingSortOrder] = useState('recent');
+  const [historySortOrder, setHistorySortOrder] = useState('recent');
+  const [feedbackSortOrder, setFeedbackSortOrder] = useState('recent');
+
+  const filteredBookings = bookings.filter(b =>
+    (!bookingSearch ||
+      (b.customBookingId && b.customBookingId.toLowerCase().includes(bookingSearch.toLowerCase())) ||
+      (b.name && b.name.toLowerCase().includes(bookingSearch.toLowerCase())) ||
+      (b.email && b.email.toLowerCase().includes(bookingSearch.toLowerCase())))
+  );
+
   if (loading) return <div className="flex justify-center items-center h-64">Loading...</div>;
   if (error) return <div className="text-red-600 text-center mt-8">{error}</div>;
 
@@ -888,6 +1054,7 @@ const AdminDashboard = () => {
               onChange={e => setUserSearch(e.target.value)}
               className="w-full md:w-64"
             />
+            <TabSortOptions tab="users" sortOrder={userSortOrder} onSortChange={setUserSortOrder} />
           </div>
           <div className="overflow-x-auto rounded-lg">
             <table className="min-w-[900px] md:min-w-full bg-white rounded-lg shadow text-xs md:text-base">
@@ -900,38 +1067,23 @@ const AdminDashboard = () => {
                   <th className="py-2 px-4">Duration</th>
                   <th className="py-2 px-4">Status</th>
                   <th className="py-2 px-4">Payments</th>
-                  <th className="py-2 px-4">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {users
-                  .filter(u =>
-                    !userSearch ||
-                    (u.id && u.id.toLowerCase().includes(userSearch.toLowerCase())) ||
-                    (u.name && u.name.toLowerCase().includes(userSearch.toLowerCase())) ||
-                    (u.email && u.email.toLowerCase().includes(userSearch.toLowerCase()))
-                  )
+                {sortUsers(filteredUsers, userSortOrder)
+                  .slice((userPage-1)*USERS_PER_PAGE, userPage*USERS_PER_PAGE)
                   .map((u, i) => (
                     <tr key={u.id} className={i % 2 === 0 ? 'bg-gray-50 hover:bg-gray-100 transition' : 'hover:bg-gray-100 transition'}>
-                      <td className="py-2 px-4 align-middle font-mono text-xs text-blue-700 font-bold">{u.username || u.id}</td>
+                      <td className="py-2 px-4 align-middle font-mono text-xs text-blue-700 font-bold">{u.id}</td>
                       <td className="py-2 px-4 align-middle">
                         <div className="flex items-center gap-3">
                           <Avatar className="w-8 h-8 text-base">
-                            <AvatarFallback>{(u.name || u.email || 'U')[0]}</AvatarFallback>
+                            <AvatarFallback>{(u.username || u.name || u.email || 'U')[0]}</AvatarFallback>
                           </Avatar>
                           <div>
-                            {u.name && <div className="font-bold text-base text-gray-900">{u.name}</div>}
-                            <div className="font-mono text-xs text-gray-700 flex items-center gap-1">
-                              <span title={u.id}>{u.id.slice(0, 6)}...{u.id.slice(-4)}</span>
-                              <button
-                                className="p-1 rounded hover:bg-gray-200"
-                                title="Copy User ID"
-                                onClick={e => { e.stopPropagation(); copyToClipboard(u.id); }}
-                              >
-                                <ClipboardCopy className="w-4 h-4 text-gray-400" />
-                              </button>
-                            </div>
-                            <div className="text-xs text-gray-500">{u.email}</div>
+                            {u.username && <div className="font-bold text-base text-gray-900">{u.username}</div>}
+                            {u.name && <div className="text-sm text-gray-700">{u.name}</div>}
+                            {u.email && <div className="text-xs text-gray-500">{u.email}</div>}
                           </div>
                         </div>
                       </td>
@@ -963,20 +1115,11 @@ const AdminDashboard = () => {
                               <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
                             </button>
                           )}
-                        </div>
-                      </td>
-                      <td className="py-2 px-4 align-middle">
-                        <div className="flex gap-2">
-                          <Button 
-                            size="sm" 
-                            onClick={(e) => { 
-                              e.stopPropagation(); 
-                              handleUsageModal(u); 
-                            }}
-                            className="bg-blue-600 text-white"
-                          >
-                            Enter Used {u.planName === 'Elite Plus' ? 'KG' : 'Amount'}
-                          </Button>
+                          {(u.payments || []).length === 0 && u.planPaymentMethod === 'cash' && (
+                            <Button size="sm" className="bg-yellow-600 text-white" onClick={e => { e.stopPropagation(); setAddPaymentModal({ open: true, user: u }); }}>
+                              Add Payment
+                            </Button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -1003,6 +1146,7 @@ const AdminDashboard = () => {
               onChange={e => setBookingSearch(e.target.value)}
               className="w-full md:w-64"
             />
+            <TabSortOptions tab="bookings" sortOrder={bookingSortOrder} onSortChange={setBookingSortOrder} />
           </div>
           <div className="overflow-x-auto rounded-lg">
             <table className="min-w-[900px] md:min-w-full bg-white rounded-lg shadow text-xs md:text-base">
@@ -1021,13 +1165,7 @@ const AdminDashboard = () => {
                 </tr>
               </thead>
               <tbody>
-                {bookings
-                  .filter(b =>
-                    !bookingSearch ||
-                    (b.customBookingId && b.customBookingId.toLowerCase().includes(bookingSearch.toLowerCase())) ||
-                    (b.name && b.name.toLowerCase().includes(bookingSearch.toLowerCase())) ||
-                    (b.email && b.email.toLowerCase().includes(bookingSearch.toLowerCase()))
-                  )
+                {sortBookings(filteredBookings, bookingSortOrder)
                   .map((b, i) => (
                     <tr key={b.id} className={i % 2 === 0 ? 'bg-gray-50 hover:bg-gray-100 transition' : 'hover:bg-gray-100 transition'}>
                       <td className="py-2 px-4 align-middle font-mono text-xs text-blue-700 font-bold">{b.customBookingId || '-'}</td>
@@ -1037,12 +1175,20 @@ const AdminDashboard = () => {
                       <td className="py-2 px-4 align-middle">{b.pickupTime}</td>
                       <td className="py-2 px-4 align-middle">{b.address}</td>
                       <td className="py-2 px-4 align-middle">
-                        <span className={`inline-block px-2 py-1 rounded text-xs font-bold ${b.status === 'pending' ? 'bg-yellow-50 text-yellow-700 border border-yellow-200' : b.status === 'accepted' ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>{b.status}</span>
-                        {b.status === 'rejected' && b.rejectReason && <div className="text-xs text-red-500 mt-1">Reason: {b.rejectReason}</div>}
-                        {b.status === 'accepted' && b.usage && (
-                          <div className="text-xs text-green-600 mt-1">
-                            Used: {b.usage} {b.planName === 'Elite Plus' ? 'KG' : '₹'}
-                          </div>
+                        {b.status === 'awaiting_payment' && (
+                          <span className="inline-block px-2 py-1 rounded text-xs font-bold bg-yellow-50 text-yellow-700 border border-yellow-200">
+                            Awaiting Payment
+                          </span>
+                        )}
+                        {b.status === 'pending' && (
+                          <span className="inline-block px-2 py-1 rounded text-xs font-bold bg-yellow-50 text-yellow-700 border border-yellow-200">
+                            Pending
+                          </span>
+                        )}
+                        {b.status === 'accepted' && (
+                          <span className="inline-block px-2 py-1 rounded text-xs font-bold bg-green-50 text-green-700 border border-green-200">
+                            Accepted
+                          </span>
                         )}
                       </td>
                       <td className="py-2 px-4 align-middle font-mono text-xs text-gray-700">{b.createdAt?.seconds ? new Date(b.createdAt.seconds * 1000).toLocaleString() : ''}</td>
@@ -1053,7 +1199,7 @@ const AdminDashboard = () => {
                         {b.status === 'pending' && (
                           <div className="flex gap-2">
                             <Button size="sm" disabled={bookingActionLoading === b.id} onClick={() => handleAcceptBooking(b)} className="bg-green-600 text-white">Accept</Button>
-                            <Button size="sm" disabled={bookingActionLoading === b.id} onClick={() => setShowRejectModal({ open: true, booking: b })} className="bg-red-600 text-white">Reject</Button>
+                            <Button size="sm" disabled={bookingActionLoading === b.id} onClick={() => { console.log('[Reject Button Clicked]', b); setShowRejectModal({ open: true, booking: b }); }} className="bg-red-600 text-white">Reject</Button>
                           </div>
                         )}
                         {b.status === 'accepted' && !b.usage && (
@@ -1068,6 +1214,36 @@ const AdminDashboard = () => {
                         {b.status === 'accepted' && b.usage && (
                           <Button size="sm" className="bg-purple-600 text-white" onClick={() => handleCompleteOrder(b)}>
                             Complete Order
+                          </Button>
+                        )}
+                        {b.status === 'cash_pending' && (
+                          <Button size="sm" className="bg-yellow-600 text-white" onClick={async () => {
+                            // Mark booking as completed
+                            setBookingActionLoading(b.id);
+                            await updateDoc(doc(db, 'bookings', b.id), {
+                              status: 'completed',
+                              paidAt: new Date().toISOString(),
+                              completedAt: new Date().toISOString(),
+                              paymentMethod: 'cash',
+                            });
+                            setBookings(bks => bks.map(bk => bk.id === b.id ? { ...bk, status: 'completed', paidAt: new Date().toISOString(), completedAt: new Date().toISOString(), paymentMethod: 'cash' } : bk));
+                            // Update payment record in user's payments array
+                            const userSnap = await getDocs(collection(db, 'users'));
+                            const userDoc = userSnap.docs.find(u => u.data().email === b.email);
+                            if (userDoc) {
+                              const userRef = doc(db, 'users', userDoc.id);
+                              const userData = userDoc.data();
+                              const payments = (userData.payments || []).map(p =>
+                                p.bookingId === b.id && p.method === 'cash' && p.status === 'Pending'
+                                  ? { ...p, status: 'Success' }
+                                  : p
+                              );
+                              await updateDoc(userRef, { payments });
+                            }
+                            setBookingActionLoading('');
+                            toast.success('Marked as paid!');
+                          }}>
+                            Mark as Paid
                           </Button>
                         )}
                       </td>
@@ -1090,6 +1266,7 @@ const AdminDashboard = () => {
               onChange={e => setHistorySearch(e.target.value)}
               className="w-full md:w-64"
             />
+            <TabSortOptions tab="history" sortOrder={historySortOrder} onSortChange={setHistorySortOrder} />
           </div>
           <div className="overflow-x-auto rounded-lg">
             <table className="min-w-[900px] md:min-w-full bg-white rounded-lg shadow text-xs md:text-base">
@@ -1105,27 +1282,16 @@ const AdminDashboard = () => {
                 </tr>
               </thead>
               <tbody>
-                {historyRequests
-                  .filter(h =>
-                    !historySearch ||
-                    (h.name && h.name.toLowerCase().includes(historySearch.toLowerCase())) ||
-                    (h.email && h.email.toLowerCase().includes(historySearch.toLowerCase()))
-                  )
-                  .map((h, i) => (
-                    <tr key={h.id} className={i % 2 === 0 ? 'bg-gray-50 hover:bg-gray-100 transition' : 'hover:bg-gray-100 transition'}>
-                      <td className="py-2 px-4 align-middle">{h.name || h.email}</td>
-                      <td className="py-2 px-4 align-middle">{h.planRequest.plan}</td>
-                      <td className="py-2 px-4 align-middle">{h.planRequest.type}</td>
-                      <td className="py-2 px-4 align-middle font-semibold capitalize">{h.planRequest.status}</td>
-                      <td className="py-2 px-4 align-middle font-mono text-xs text-gray-700">{h.planRequest.requestedAt ? new Date(h.planRequest.requestedAt).toLocaleString() : ''}</td>
-                      <td className="py-2 px-4 align-middle font-mono text-xs text-gray-700">{
-                        h.planRequest.rejectedAt
-                          ? new Date(h.planRequest.rejectedAt).toLocaleString()
-                          : h.planRequest.approvedAt
-                            ? new Date(h.planRequest.approvedAt).toLocaleString()
-                            : ''
-                      }</td>
-                      <td className="py-2 px-4 align-middle text-red-700">{h.planRequest.rejectReason || '-'}</td>
+                {sortHistory(filteredBookings, historySortOrder)
+                  .map((b, i) => (
+                    <tr key={b.id} className={i % 2 === 0 ? 'bg-gray-50 hover:bg-gray-100 transition' : 'hover:bg-gray-100 transition'}>
+                      <td className="py-2 px-4 align-middle">{b.username || b.name || b.email}</td>
+                      <td className="py-2 px-4 align-middle">{b.service || b.planName}</td>
+                      <td className="py-2 px-4 align-middle">{b.type || '-'}</td>
+                      <td className="py-2 px-4 align-middle font-semibold capitalize">{b.status}</td>
+                      <td className="py-2 px-4 align-middle font-mono text-xs text-gray-700">{b.createdAt?.seconds ? new Date(b.createdAt.seconds * 1000).toLocaleString() : ''}</td>
+                      <td className="py-2 px-4 align-middle font-mono text-xs text-gray-700">{b.completedAt ? new Date(b.completedAt).toLocaleString() : b.rejectedAt ? new Date(b.rejectedAt).toLocaleString() : ''}</td>
+                      <td className="py-2 px-4 align-middle text-red-700">{b.rejectReason || '-'}</td>
                     </tr>
                   ))}
               </tbody>
@@ -1222,56 +1388,57 @@ const AdminDashboard = () => {
                 </tr>
               </thead>
               <tbody>
-                {paginatedMessages.map((m, i) => (
-                  <tr key={m.id} className={`transition ${i % 2 === 0 ? 'bg-purple-50/40' : 'bg-white'} hover:bg-purple-100/60 border-b border-purple-100`}>
-                    <td className="py-3 px-4 align-middle"><input type="checkbox" checked={selectedMsgIds.includes(m.id)} onChange={() => handleMsgSelect(m.id)} /></td>
-                    <td className="py-3 px-4 align-middle">
-                      <div className="flex items-center gap-3">
-                        <Avatar className="w-8 h-8 text-base bg-purple-200 text-purple-700">
-                          <AvatarFallback>{(m.name || m.email || 'U')[0]}</AvatarFallback>
-                        </Avatar>
-                        <div>
-                          <div className="font-bold text-base text-gray-900">{m.name}</div>
-                          <div className="text-xs text-gray-500">{m.email}</div>
+                {sortFeedback(filteredMessages, feedbackSortOrder)
+                  .map((msg, i) => (
+                    <tr key={msg.id} className={`transition ${i % 2 === 0 ? 'bg-purple-50/40' : 'bg-white'} hover:bg-purple-100/60 border-b border-purple-100`}>
+                      <td className="py-3 px-4 align-middle"><input type="checkbox" checked={selectedMsgIds.includes(msg.id)} onChange={() => handleMsgSelect(msg.id)} /></td>
+                      <td className="py-3 px-4 align-middle">
+                        <div className="flex items-center gap-3">
+                          <Avatar className="w-8 h-8 text-base bg-purple-200 text-purple-700">
+                            <AvatarFallback>{(msg.name || msg.email || 'U')[0]}</AvatarFallback>
+                          </Avatar>
+                          <div>
+                            <div className="font-bold text-base text-gray-900">{msg.name}</div>
+                            <div className="text-xs text-gray-500">{msg.email}</div>
+                          </div>
                         </div>
-                      </div>
-                    </td>
-                    <td className="py-3 px-4 align-middle text-gray-700">{m.subject || <span className="text-gray-400">NA</span>}</td>
-                    <td className="py-3 px-4 align-middle text-gray-700">{m.message || <span className="text-gray-400">NA</span>}</td>
-                    <td className="py-3 px-4 align-middle font-mono text-xs text-gray-700">{m.createdAt?.seconds ? new Date(m.createdAt.seconds * 1000).toLocaleString() : ''}</td>
-                    <td className="py-3 px-4 align-middle">
-                      <span className={`inline-block px-3 py-1 rounded-full text-xs font-bold ${m.read ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-yellow-50 text-yellow-700 border border-yellow-200'}`}>{m.read ? 'Read' : 'Unread'}</span>
-                    </td>
-                    <td className="py-3 px-4 align-middle">
-                      <button
-                        className="flex items-center gap-1 px-2 py-1 rounded-full bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-semibold shadow-sm transition"
-                        onClick={() => { setModalType('note'); setModalMsgId(m.id); }}
-                      >
-                        <StickyNote className="w-4 h-4" /> {m.adminNote ? 'Edit Note' : 'Add Note'}
-                      </button>
-                    </td>
-                    <td className="py-3 px-4 align-middle flex gap-2">
-                      <button
-                        className="flex items-center gap-1 px-2 py-1 rounded-full bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold shadow-sm transition"
-                        onClick={() => { setModalType('reply'); setModalMsgId(m.id); }}
-                      >
-                        <MessageCircle className="w-4 h-4" /> Reply
-                      </button>
-                      <button
-                        className="flex items-center gap-1 px-2 py-1 rounded-full bg-gray-50 hover:bg-gray-200 text-gray-700 text-xs font-semibold shadow-sm border border-gray-200 transition"
-                        onClick={() => handleMarkRead(m.id, !m.read)}
-                      >
-                        <Pencil className="w-4 h-4" /> {m.read ? 'Mark Unread' : 'Mark Read'}
-                      </button>
-                      <button
-                        className="flex items-center gap-1 px-2 py-1 rounded-full bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold shadow-sm border border-red-200 transition"
-                        onClick={() => handleDeleteMsg(m.id)}
-                      >
-                        <Trash2 className="w-4 h-4" /> Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="py-3 px-4 align-middle text-gray-700">{msg.subject || <span className="text-gray-400">NA</span>}</td>
+                      <td className="py-3 px-4 align-middle text-gray-700">{msg.message || <span className="text-gray-400">NA</span>}</td>
+                      <td className="py-3 px-4 align-middle font-mono text-xs text-gray-700">{msg.createdAt?.seconds ? new Date(msg.createdAt.seconds * 1000).toLocaleString() : ''}</td>
+                      <td className="py-3 px-4 align-middle">
+                        <span className={`inline-block px-3 py-1 rounded-full text-xs font-bold ${msg.read ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-yellow-50 text-yellow-700 border border-yellow-200'}`}>{msg.read ? 'Read' : 'Unread'}</span>
+                      </td>
+                      <td className="py-3 px-4 align-middle">
+                        <button
+                          className="flex items-center gap-1 px-2 py-1 rounded-full bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-semibold shadow-sm transition"
+                          onClick={() => { setModalType('note'); setModalMsgId(msg.id); }}
+                        >
+                          <StickyNote className="w-4 h-4" /> {msg.adminNote ? 'Edit Note' : 'Add Note'}
+                        </button>
+                      </td>
+                      <td className="py-3 px-4 align-middle flex gap-2">
+                        <button
+                          className="flex items-center gap-1 px-2 py-1 rounded-full bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold shadow-sm transition"
+                          onClick={() => { setModalType('reply'); setModalMsgId(msg.id); }}
+                        >
+                          <MessageCircle className="w-4 h-4" /> Reply
+                        </button>
+                        <button
+                          className="flex items-center gap-1 px-2 py-1 rounded-full bg-gray-50 hover:bg-gray-200 text-gray-700 text-xs font-semibold shadow-sm border border-gray-200 transition"
+                          onClick={() => handleMarkRead(msg.id, !msg.read)}
+                        >
+                          <Pencil className="w-4 h-4" /> {msg.read ? 'Mark Unread' : 'Mark Read'}
+                        </button>
+                        <button
+                          className="flex items-center gap-1 px-2 py-1 rounded-full bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold shadow-sm border border-red-200 transition"
+                          onClick={() => handleDeleteMsg(msg.id)}
+                        >
+                          <Trash2 className="w-4 h-4" /> Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
               </tbody>
             </table>
           </div>
@@ -1448,19 +1615,78 @@ const AdminDashboard = () => {
               type="number"
               value={usageModal.value}
               onChange={e => setUsageModal(m => ({ ...m, value: e.target.value }))}
-              placeholder={usageModal.user.planName === 'Elite Plus' ? 'KG used' : 'Amount used'}
+              placeholder={usageModal.user && usageModal.user.planName === 'Elite Plus' ? 'KG used' : 'Amount due'}
               className="w-full border rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-blue-400"
             />
             <div className="flex justify-end gap-2">
               <Button onClick={() => setUsageModal({ open: false, user: null, value: '', bookingId: null })} variant="outline">Cancel</Button>
-              <Button onClick={handleDeductUsage}>Deduct</Button>
+              {usageModal.user && usageModal.user.planName ? (
+                <Button onClick={handleDeductUsage}>Deduct</Button>
+              ) : (
+                <Button onClick={handleSetAmountDue} disabled={!usageModal.value}>Set Amount Due</Button>
+              )}
             </div>
           </div>
         </Modal>
       )}
+      {/* Bookings Reject Modal */}
+      {showRejectModal.open && showRejectModal.booking && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full relative">
+            <button
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl"
+              onClick={() => { setShowRejectModal({ open: false, booking: null }); setRejectReason(''); }}
+              aria-label="Close"
+            >×</button>
+            <h2 className="text-xl font-bold mb-4 text-red-700">Reject Booking</h2>
+            <label className="block mb-2 font-medium text-gray-700">Reason for rejection (optional)</label>
+            <textarea
+              className="w-full border rounded-lg p-2 mb-4 focus:outline-none focus:ring-2 focus:ring-red-400"
+              placeholder="Enter reason (optional)"
+              value={rejectReason}
+              onChange={e => setRejectReason(e.target.value)}
+              rows={3}
+            />
+            <div className="flex gap-2 justify-end">
+              <Button onClick={() => { setShowRejectModal({ open: false, booking: null }); setRejectReason(''); }} variant="outline">Cancel</Button>
+              <Button className="bg-red-600 text-white" onClick={() => handleRejectBooking(showRejectModal.booking, rejectReason)} disabled={!showRejectModal.booking}>Reject</Button>
+            </div>
+          </div>
+        </div>
+      )}
       {notifDropdownOpen && (
         <div ref={notifDropdownRef} className="absolute ...">
           ...dropdown content...
+        </div>
+      )}
+      {addPaymentModal.open && addPaymentModal.user && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full relative">
+            <button className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl" onClick={() => setAddPaymentModal({ open: false, user: null })} aria-label="Close">×</button>
+            <h2 className="text-xl font-bold mb-4 text-yellow-700">Add Payment</h2>
+            <label className="block mb-2 font-medium text-gray-700">Amount</label>
+            <input
+              type="number"
+              className="w-full border rounded-lg p-2 mb-4 focus:outline-none focus:ring-2 focus:ring-yellow-400"
+              value={addPaymentAmount}
+              onChange={e => setAddPaymentAmount(e.target.value)}
+              placeholder="Enter amount"
+            />
+            <label className="block mb-2 font-medium text-gray-700">Status</label>
+            <select
+              className="w-full border rounded-lg p-2 mb-4 focus:outline-none focus:ring-2 focus:ring-yellow-400"
+              value={addPaymentStatus}
+              onChange={e => setAddPaymentStatus(e.target.value)}
+            >
+              <option value="Success">Success</option>
+              <option value="Pending">Pending</option>
+              <option value="Failed">Failed</option>
+            </select>
+            <div className="flex gap-2 justify-end">
+              <Button onClick={() => setAddPaymentModal({ open: false, user: null })} variant="outline">Cancel</Button>
+              <Button className="bg-yellow-600 text-white" onClick={handleAddPaymentManually} disabled={!addPaymentAmount}>Add Payment</Button>
+            </div>
+          </div>
         </div>
       )}
     </div>
