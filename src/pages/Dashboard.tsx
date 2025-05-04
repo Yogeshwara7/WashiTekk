@@ -12,6 +12,8 @@ import { Mail, Phone } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { colors } from '@/styles/colors';
 import { generateReceipt, loadImageAsBase64 } from '../utils/generateReceipt';
+import { toast } from 'react-hot-toast';
+import { openRazorpay } from '../utils/razorpay';
 
 const availablePlans = [
   { name: 'Elite', price: 3000, duration: '3 Months' },
@@ -58,6 +60,8 @@ const Dashboard = () => {
   const [bookings, setBookings] = useState([]);
   const [showAllBookings, setShowAllBookings] = useState(false);
   const [showAllPayments, setShowAllPayments] = useState(false);
+  const [showPayNowModal, setShowPayNowModal] = useState({ open: false, booking: null });
+  const [payNowLoading, setPayNowLoading] = useState(false);
   const faqs = [
     {
       q: 'How do I renew or upgrade my plan?',
@@ -86,28 +90,32 @@ const Dashboard = () => {
   ];
   const navigate = useNavigate();
 
+  // Effect 1: Auth
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
       if (!firebaseUser) {
         navigate('/login');
         return;
       }
       setUser(firebaseUser);
-      try {
-        const docRef = doc(db, 'users', firebaseUser.uid);
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          setDashboard(docSnap.data());
-        } else {
-          setDashboard(null);
-        }
-      } catch (err) {
-        setError('Failed to load dashboard data.');
-      }
-      setLoading(false);
     });
     return () => unsubscribe();
   }, [navigate]);
+
+  // Effect 2: Firestore User Data
+  useEffect(() => {
+    if (!user) return;
+    const docRef = doc(db, 'users', user.uid);
+    const unsub = onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        setDashboard(docSnap.data());
+      } else {
+        setDashboard(null);
+      }
+      setLoading(false);
+    });
+    return () => unsub();
+  }, [user]);
 
   // Fetch notifications in real-time
   useEffect(() => {
@@ -152,7 +160,158 @@ const Dashboard = () => {
     fetchBookings();
   }, [user]);
 
+  useEffect(() => {
+    if (user && dashboard) {
+      console.log('[User Dashboard Debug]', {
+        uid: user.uid,
+        email: user.email,
+        payments: dashboard.payments
+      });
+    }
+  }, [user, dashboard]);
+
   console.log({ user, dashboard, loading, error });
+
+  const handlePayNow = async (bookingId, method = 'online') => {
+    // Simulate payment process (replace with real payment integration as needed)
+    const bookingRef = doc(db, 'bookings', bookingId);
+    const bookingSnap = await getDoc(bookingRef);
+    const booking = bookingSnap.exists() ? bookingSnap.data() : null;
+    if (!booking) return toast.error('Booking not found.');
+
+    // Add payment record to user
+    const userRef = doc(db, 'users', user.uid);
+    const userSnap = await getDoc(userRef);
+    const prevPayments = userSnap.exists() ? (userSnap.data().payments || []) : [];
+    const paymentRecord = {
+      date: new Date().toLocaleString(),
+      amount: booking.amountDue || booking.usage || 0,
+      status: 'Success',
+      method,
+      bookingId,
+    };
+    await updateDoc(userRef, { payments: [...prevPayments, paymentRecord] });
+
+    // Mark booking as completed
+    await updateDoc(bookingRef, {
+      status: 'completed',
+      paidAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      paymentMethod: method,
+    });
+    setBookings(bks => bks.map(b => b.id === bookingId ? { ...b, status: 'completed', paidAt: new Date().toISOString(), completedAt: new Date().toISOString(), paymentMethod: method } : b));
+
+    // Admin notification for payment received
+    await addDoc(collection(db, 'admin_notifications'), {
+      title: 'Payment Received',
+      body: `Payment received and booking completed for booking ${bookingId}.`,
+      type: 'payment',
+      bookingId,
+      read: false,
+      createdAt: Timestamp.now(),
+    });
+    toast.success('Payment successful! Your booking is now completed.');
+  };
+
+  const handleUserNotifClick = async (notif: UserNotification) => {
+    if (!user) return;
+    // Mark as read in Firestore
+    await updateDoc(doc(db, 'users', user.uid, 'notifications', notif.id), { read: true });
+    setNotifications(nots => nots.map(n => n.id === notif.id ? { ...n, read: true } : n));
+    // Navigate to relevant section
+    if (notif.type === 'booking') window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); // or set a tab if you have one
+    else if (notif.type === 'payment') window.scrollTo({ top: 0, behavior: 'smooth' }); // or set a tab if you have one
+    else if (notif.type === 'feedback') window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+    // Add more types as needed
+  };
+
+  const handleOpenPayNowModal = (booking) => {
+    setShowPayNowModal({ open: true, booking });
+  };
+
+  const handlePayWithCredits = async () => {
+    if (!showPayNowModal.booking) return;
+    setPayNowLoading(true);
+    // Deduct credits from user
+    const userRef = doc(db, 'users', user.uid);
+    const userSnap = await getDoc(userRef);
+    const prevCredits = userSnap.exists() ? (userSnap.data().credits || 0) : 0;
+    const amountDue = showPayNowModal.booking.amountDue || showPayNowModal.booking.usage || 0;
+    if (prevCredits < amountDue) {
+      toast.error('Not enough credits.');
+      setPayNowLoading(false);
+      return;
+    }
+    await updateDoc(userRef, { credits: prevCredits - amountDue });
+    await handlePayNow(showPayNowModal.booking.id, 'credits');
+    setPayNowLoading(false);
+    setShowPayNowModal({ open: false, booking: null });
+  };
+
+  const handlePayWithCash = async () => {
+    if (!showPayNowModal.booking) return;
+    setPayNowLoading(true);
+    try {
+      const bookingId = showPayNowModal.booking.id;
+      const bookingRef = doc(db, 'bookings', bookingId);
+      const userRef = doc(db, 'users', user.uid);
+      
+      // Add payment record with Pending status
+      const userSnap = await getDoc(userRef);
+      const prevPayments = userSnap.exists() ? (userSnap.data().payments || []) : [];
+      const paymentRecord = {
+        date: new Date().toLocaleString(),
+        amount: showPayNowModal.booking.amountDue || showPayNowModal.booking.usage || 0,
+        status: 'Pending',
+        method: 'cash',
+        bookingId,
+      };
+      await updateDoc(userRef, { payments: [...prevPayments, paymentRecord] });
+      
+      // Mark booking as cash_pending
+      await updateDoc(bookingRef, {
+        status: 'cash_pending',
+        paymentMethod: 'cash',
+      });
+      
+      // Update local state
+      setBookings(bks => bks.map(b => b.id === bookingId ? { 
+        ...b, 
+        status: 'cash_pending',
+        paymentMethod: 'cash'
+      } : b));
+      
+      toast.success('Cash payment initiated! Please pay the admin.');
+      setShowPayNowModal({ open: false, booking: null });
+    } catch (error) {
+      console.error('Error processing cash payment:', error);
+      toast.error('Failed to process cash payment. Please try again.');
+    } finally {
+      setPayNowLoading(false);
+    }
+  };
+
+  const handlePayWithOnline = async () => {
+    if (!showPayNowModal.booking) return;
+    setPayNowLoading(true);
+    const booking = showPayNowModal.booking;
+    const amount = booking.amountDue || booking.usage || 0;
+    await openRazorpay({
+      amount,
+      description: `Payment for booking ${booking.id}`,
+      receipt: booking.id,
+      onSuccess: async (response) => {
+        // Mark booking as paid only if payment is verified
+        await handlePayNow(booking.id, 'online');
+        setPayNowLoading(false);
+        setShowPayNowModal({ open: false, booking: null });
+      },
+      onFailure: (errMsg) => {
+        toast.error(errMsg || 'Payment failed or cancelled.');
+        setPayNowLoading(false);
+      }
+    });
+  };
 
   if (loading) return <div className="flex justify-center items-center h-64">Loading...</div>;
   if (error) return <div className="text-red-600 text-center mt-8">{error}</div>;
@@ -210,8 +369,8 @@ const Dashboard = () => {
               <span className="text-gray-500">₹{dashboard.planPrice} / {dashboard.planDuration}</span>
               <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-green-50 text-green-700 font-semibold text-xs"><CheckCircle className="w-4 h-4" />{dashboard.planStatus || 'Active'}</span>
             </div>
-            {/* KG Usage Progress */}
-            {dashboard.planKG && (
+            {/* KG or Amount Usage Progress */}
+            {dashboard.planName === 'Elite Plus' && dashboard.planKG && (
               <div className="mb-2">
                 <div className="text-gray-600">KG Usage:</div>
                 <div className="flex items-center gap-2">
@@ -219,6 +378,17 @@ const Dashboard = () => {
                     <div className="h-3 bg-blue-500 rounded-full" style={{ width: `${Math.min(100, Math.round(((dashboard.usage || 0) / dashboard.planKG) * 100))}%` }}></div>
                   </div>
                   <span className="font-semibold text-blue-700">{dashboard.usage || 0} / {dashboard.planKG} KG</span>
+                </div>
+              </div>
+            )}
+            {dashboard.planName === 'Elite' && dashboard.planPrice && (
+              <div className="mb-2">
+                <div className="text-gray-600">Amount Usage:</div>
+                <div className="flex items-center gap-2">
+                  <div className="w-48 h-3 bg-gray-200 rounded-full overflow-hidden">
+                    <div className="h-3 bg-blue-500 rounded-full" style={{ width: `${Math.min(100, Math.round(((dashboard.amountUsed || 0) / dashboard.planPrice) * 100))}%` }}></div>
+                  </div>
+                  <span className="font-semibold text-blue-700">₹{dashboard.amountUsed || 0} / ₹{dashboard.planPrice}</span>
                 </div>
               </div>
             )}
@@ -259,7 +429,7 @@ const Dashboard = () => {
           </button>
         </div>
         <hr className="mb-6 border-purple-200" />
-        {dashboard && dashboard.payments && dashboard.payments.length > 0 ? (
+        {dashboard && Array.isArray(dashboard.payments) && dashboard.payments.length > 0 ? (
           <div className="overflow-x-auto">
             <table className="w-full rounded-xl shadow-md overflow-hidden">
               <thead>
@@ -271,7 +441,7 @@ const Dashboard = () => {
                 </tr>
               </thead>
               <tbody>
-                {dashboard.payments.slice(0, 2).map((p, i) => (
+                {(dashboard.payments || []).slice(0, 2).map((p, i) => (
                   <tr key={i} className={`border-t ${i % 2 === 0 ? 'bg-gray-50 dark:bg-gray-800' : 'bg-white dark:bg-gray-900'} hover:bg-blue-50 dark:hover:bg-blue-950 transition`}>
                     <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{p.date}</td>
                     <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">₹{p.amount}</td>
@@ -380,7 +550,15 @@ const Dashboard = () => {
                     <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.pickupTime}</td>
                     <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.address}</td>
                     <td className="py-3 px-6 align-middle">
-                      <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${b.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>{b.status || 'pending'}</span>
+                      <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${b.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : b.status === 'accepted' ? 'bg-blue-100 text-blue-700' : b.status === 'completed' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>{b.status || 'pending'}</span>
+                      {b.status === 'awaiting_payment' && (
+                        <Button className="ml-2 px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded" onClick={() => handleOpenPayNowModal(b)}>
+                          Pay Now
+                        </Button>
+                      )}
+                      {b.status === 'completed' && b.paidAt && (
+                        <span className="ml-2 text-green-600 text-xs">Paid on {new Date(b.paidAt).toLocaleDateString()}</span>
+                      )}
                     </td>
                     <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.createdAt?.toDate ? b.createdAt.toDate().toLocaleString() : ''}</td>
                   </tr>
@@ -418,7 +596,15 @@ const Dashboard = () => {
                       <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.pickupTime}</td>
                       <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.address}</td>
                       <td className="py-3 px-6 align-middle">
-                        <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${b.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>{b.status || 'pending'}</span>
+                        <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${b.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : b.status === 'accepted' ? 'bg-blue-100 text-blue-700' : b.status === 'completed' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>{b.status || 'pending'}</span>
+                        {b.status === 'awaiting_payment' && (
+                          <Button className="ml-2 px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded" onClick={() => handleOpenPayNowModal(b)}>
+                            Pay Now
+                          </Button>
+                        )}
+                        {b.status === 'completed' && b.paidAt && (
+                          <span className="ml-2 text-green-600 text-xs">Paid on {new Date(b.paidAt).toLocaleDateString()}</span>
+                        )}
                       </td>
                       <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.createdAt?.toDate ? b.createdAt.toDate().toLocaleString() : ''}</td>
                     </tr>
@@ -604,6 +790,22 @@ const Dashboard = () => {
           ))}
         </div>
       </div>
+      {showPayNowModal.open && showPayNowModal.booking && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full relative">
+            <button className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl" onClick={() => setShowPayNowModal({ open: false, booking: null })} aria-label="Close">×</button>
+            <h2 className="text-xl font-bold mb-4 text-blue-700">Pay Now</h2>
+            <div className="mb-4 text-lg">Amount Due: <span className="font-bold">₹{showPayNowModal.booking.amountDue || showPayNowModal.booking.usage || 0}</span></div>
+            <div className="flex flex-col gap-3">
+              <Button onClick={handlePayWithOnline} disabled={payNowLoading} className="bg-blue-600 text-white">Pay Online</Button>
+              <Button onClick={handlePayWithCredits} disabled={payNowLoading || (dashboard?.credits || 0) < (showPayNowModal.booking.amountDue || showPayNowModal.booking.usage || 0)} className="bg-green-600 text-white">
+                Pay with Credits ({dashboard?.credits || 0} available)
+              </Button>
+              <Button onClick={handlePayWithCash} disabled={payNowLoading} className="bg-yellow-600 text-white">Pay with Cash</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

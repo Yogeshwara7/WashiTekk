@@ -137,6 +137,83 @@ const Profile = () => {
             </div>
           </div>
         </div>
+        {/* Edit Modal */}
+        {editOpen && (
+          <form
+            onSubmit={handleSave}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+            style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh' }}
+          >
+            <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full relative">
+              <button
+                className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl"
+                onClick={handleClose}
+                type="button"
+                aria-label="Close"
+              >×</button>
+              <h2 className="text-xl font-bold mb-4 text-blue-700">Edit Profile</h2>
+              <label className="block mb-2 font-medium text-gray-700">Name</label>
+              <input
+                className="w-full border rounded-lg p-2 mb-4"
+                name="name"
+                value={form.name}
+                onChange={handleChange}
+                required
+              />
+              <label className="block mb-2 font-medium text-gray-700">Phone</label>
+              <input
+                className="w-full border rounded-lg p-2 mb-4"
+                name="phone"
+                value={form.phone}
+                onChange={handleChange}
+                required
+              />
+              <label className="block mb-2 font-medium text-gray-700">Street</label>
+              <input
+                className="w-full border rounded-lg p-2 mb-2"
+                name="address.street"
+                value={form.address.street}
+                onChange={handleChange}
+              />
+              <label className="block mb-2 font-medium text-gray-700">City</label>
+              <input
+                className="w-full border rounded-lg p-2 mb-2"
+                name="address.city"
+                value={form.address.city}
+                onChange={handleChange}
+              />
+              <label className="block mb-2 font-medium text-gray-700">State</label>
+              <input
+                className="w-full border rounded-lg p-2 mb-2"
+                name="address.state"
+                value={form.address.state}
+                onChange={handleChange}
+              />
+              <label className="block mb-2 font-medium text-gray-700">Zip</label>
+              <input
+                className="w-full border rounded-lg p-2 mb-2"
+                name="address.zip"
+                value={form.address.zip}
+                onChange={handleChange}
+              />
+              <label className="block mb-2 font-medium text-gray-700">Country</label>
+              <input
+                className="w-full border rounded-lg p-2 mb-4"
+                name="address.country"
+                value={form.address.country}
+                onChange={handleChange}
+              />
+              <button
+                type="submit"
+                className="w-full py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold transition"
+                disabled={saving}
+              >
+                {saving ? 'Saving...' : 'Save'}
+              </button>
+              {message && <div className="mt-3 text-green-600">{message}</div>}
+            </div>
+          </form>
+        )}
         {/* Saved Address Section */}
         <div className="rounded-2xl shadow-lg p-6 mb-10" style={{ background: colors.cardBackground, border: `1px solid ${colors.stroke}` }}>
           <h2 className="text-xl font-bold mb-3 tracking-tight" style={{ color: colors.cardHeading }}>Saved Address</h2>

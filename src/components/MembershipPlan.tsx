@@ -430,23 +430,23 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
               </div>
               <div className="flex-1 flex flex-col p-6">
                 <div className="space-y-4 flex-1">
-                  {plan.features.map((feature, featureIndex) => (
-                    <div key={featureIndex} className="flex items-start space-x-3">
-                      <Check className="w-5 h-5 text-green-500 flex-shrink-0 mt-1" />
-                      <span className="text-gray-600 text-sm">{feature}</span>
-                    </div>
-                  ))}
+                {plan.features.map((feature, featureIndex) => (
+                  <div key={featureIndex} className="flex items-start space-x-3">
+                    <Check className="w-5 h-5 text-green-500 flex-shrink-0 mt-1" />
+                    <span className="text-gray-600 text-sm">{feature}</span>
+                  </div>
+                ))}
                 </div>
                 {userPlan?.planStatus === 'Active' && !planExpired ? (
                   <Button className="mt-auto bg-gray-200 text-gray-500 font-semibold cursor-not-allowed" disabled>You have an active plan</Button>
                 ) : (
-                  <Button 
+                <Button 
                     className="mt-auto bg-yellow-400 hover:bg-yellow-500 text-gray-900 font-semibold"
                     onClick={() => handlePlanSelection(plan)}
                     disabled={loadingUserPlan}
-                  >
-                    SELECT PLAN
-                  </Button>
+                >
+                  SELECT PLAN
+                </Button>
                 )}
               </div>
             </motion.div>
