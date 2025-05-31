@@ -1,7 +1,7 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, lazy, Suspense } from 'react';
 import { auth, db } from '../firebase';
 import { onAuthStateChanged } from 'firebase/auth';
-import { collection, getDocs, doc, updateDoc, deleteDoc, updateDoc as updateContactDoc, onSnapshot, addDoc, getDoc } from 'firebase/firestore';
+import { collection, getDocs, doc, updateDoc, deleteDoc, updateDoc as updateContactDoc, onSnapshot, addDoc, getDoc, query, orderBy } from 'firebase/firestore';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
@@ -18,6 +18,15 @@ import { nanoid } from 'nanoid';
 import { toast } from 'react-toastify';
 import TabSortOptions from '../components/TabSortOptions';
 import { sortUsers, sortBookings, sortHistory, sortFeedback } from '../utils/sortUtils';
+import { generateReceipt, loadImageAsBase64 } from '../utils/generateReceipt';
+
+// Lazy load tab components
+const UsersTab = lazy(() => import('../components/dashboard/UsersTab'));
+const BookingsTab = lazy(() => import('../components/dashboard/BookingsTab'));
+const HistoryTab = lazy(() => import('../components/dashboard/HistoryTab'));
+const FeedbackTab = lazy(() => import('../components/dashboard/FeedbackTab'));
+const PlanRequestsTab = lazy(() => import('../components/dashboard/PlanRequestsTab'));
+const AnalyticsTab = lazy(() => import('../components/dashboard/AnalyticsTab'));
 
 // List of admin emails (replace with your admin email(s))
 const ADMIN_EMAILS = ['yogeshwara49@gmail.com'];
@@ -44,6 +53,38 @@ interface PlanRequestUser {
   };
 }
 
+// Export the Booking interface
+export interface Booking {
+  id: string;
+  customBookingId?: string;
+  service?: string;
+  username?: string;
+  name?: string;
+  email?: string;
+  pickupDate?: string;
+  pickupTime?: string;
+  address?: string;
+  status?: string;
+  createdAt?: any;
+  usage?: number;
+  planName?: string;
+  amountDue?: number;
+  isNoPlanBooking?: boolean;
+}
+
+interface Message {
+  id: string;
+  name: string;
+  email: string;
+  subject: string;
+  message: string;
+  read: boolean;
+  timestamp: any;
+  reply?: string;
+  adminNote?: string;
+  status: 'pending' | 'resolved';
+}
+
 const AdminDashboard = () => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -58,23 +99,17 @@ const AdminDashboard = () => {
   const [search, setSearch] = useState('');
   const [planFilter, setPlanFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
-  const [tab, setTab] = useState('users');
-  const [messages, setMessages] = useState([]);
-  const [msgLoading, setMsgLoading] = useState(false);
-  const [msgSearch, setMsgSearch] = useState('');
-  const [replyInputs, setReplyInputs] = useState({});
+  const [tab, setTab] = useState('users'); // Default tab to users
+  const [messages, setMessages] = useState<Message[]>([]); // State to hold all messages
   const navigate = useNavigate();
   const location = useLocation();
 
   // Pagination state
   const [userPage, setUserPage] = useState(1);
-  const [msgPage, setMsgPage] = useState(1);
   const USERS_PER_PAGE = 10;
-  const MSGS_PER_PAGE = 10;
 
   // Bulk selection state
   const [selectedUserIds, setSelectedUserIds] = useState([]);
-  const [selectedMsgIds, setSelectedMsgIds] = useState([]);
 
   // Analytics
   const totalUsers = users.length;
@@ -86,26 +121,15 @@ const AdminDashboard = () => {
   // Admin notes state
   const [userNote, setUserNote] = useState('');
   const [userNoteSaving, setUserNoteSaving] = useState(false);
-  const [msgNotes, setMsgNotes] = useState({});
-  const [msgNoteSaving, setMsgNoteSaving] = useState({});
 
   const [notifications, setNotifications] = useState([]);
-
-  // Add state for expanded reply/note rows
-  const [expandedReply, setExpandedReply] = useState(null);
-  const [expandedNote, setExpandedNote] = useState(null);
-
-  // Modal state for feedback actions
-  const [modalType, setModalType] = useState(null); // 'reply' or 'note'
-  const [modalMsgId, setModalMsgId] = useState(null);
+  const [bookings, setBookings] = useState<Booking[]>([]); // State to hold all bookings
 
   // Real-time feedback notifications
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'contact_messages'), (snap) => {
-      const newMsgs = snap.docChanges().filter(change => change.type === 'added').map(change => ({ id: change.doc.id, ...change.doc.data() })) as any[];
-      if (newMsgs.length > 0) {
-        setNotifications(n => [...n, ...newMsgs.map(m => ({ type: 'feedback', id: m.id, name: m.name, subject: m.subject }))]);
-      }
+      const updatedMessages = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Message));
+      setMessages(updatedMessages);
     });
     return () => unsub();
   }, []);
@@ -127,14 +151,30 @@ const AdminDashboard = () => {
   }, []);
   // Real-time booking notifications
   useEffect(() => {
-    const unsub = onSnapshot(collection(db, 'bookings'), (snap) => {
+    const unsub = onSnapshot(query(collection(db, 'bookings'), orderBy('createdAt', 'desc')), (snap) => {
       snap.docChanges().forEach(change => {
+        const booking = { id: change.doc.id, ...change.doc.data() } as Booking;
+        // Handle added or modified bookings
+        if (change.type === 'added' || change.type === 'modified') {
+          setBookings(currentBookings => {
+            const existingIndex = currentBookings.findIndex(b => b.id === booking.id);
+            if (existingIndex > -1) {
+              // Update existing booking
+              return currentBookings.map((b, index) => index === existingIndex ? booking : b);
+            } else {
+              // Add new booking
         if (change.type === 'added') {
-          const booking = change.doc.data();
           setNotifications(n => [
             ...n,
-            { type: 'booking', id: change.doc.id, name: booking.name || booking.email, service: booking.service }
-          ]);
+                   { type: 'booking', id: booking.id, name: booking.name || booking.email, service: booking.service }
+                 ]);
+              }
+              return [...currentBookings, booking];
+            }
+          });
+        } else if (change.type === 'removed') {
+          // Handle removed bookings
+          setBookings(currentBookings => currentBookings.filter(b => b.id !== booking.id));
         }
       });
     });
@@ -151,13 +191,19 @@ const AdminDashboard = () => {
       if (state.searchQuery) {
         switch (state.activeTab) {
           case 'feedback':
-            setMsgSearch(state.searchQuery);
+            // Assuming feedback search is handled within FeedbackTab
             break;
           case 'users':
-            setUserSearch(state.searchQuery);
+            // Assuming user search is handled within UsersTab now
             break;
-          case 'bookings':
-            setBookingSearch(state.searchQuery);
+          case 'bookings': // This case might not be needed anymore if 'bookings' isn't a top-level tab
+             // Assuming booking search is handled within HistoryTab/RequestsTab
+            break;
+          case 'requests':
+             // Assuming requests search is handled within RequestsTab
+            break;
+          case 'history':
+             // Assuming history search is handled within HistoryTab
             break;
         }
       }
@@ -167,7 +213,7 @@ const AdminDashboard = () => {
     }
   }, [location]);
 
-  // Ensure admin access
+  // Ensure admin access and fetch initial data
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (!firebaseUser || !ADMIN_EMAILS.includes(firebaseUser.email)) {
@@ -179,29 +225,22 @@ const AdminDashboard = () => {
         const usersSnap = await getDocs(collection(db, 'users'));
         const usersList = usersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setUsers(usersList);
+
+        const bookingsSnap = await getDocs(query(collection(db, 'bookings'), orderBy('createdAt', 'desc')));
+        const bookingsList = bookingsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Booking));
+        setBookings(bookingsList);
+
+        const messagesSnap = await getDocs(collection(db, 'contact_messages'));
+        const messagesList = messagesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Message));
+        setMessages(messagesList);
+
       } catch (err) {
-        setError('Failed to load users.');
+        setError('Failed to load initial data.');
       }
       setLoading(false);
     });
     return () => unsubscribe();
   }, [navigate]);
-
-  // Fetch feedback/support messages
-  useEffect(() => {
-    if (tab !== 'feedback') return;
-    setMsgLoading(true);
-    getDocs(collection(db, 'contact_messages')).then(snap => {
-      setMessages(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-      setMsgLoading(false);
-    });
-  }, [tab]);
-
-  // Load user note when modal opens
-  useEffect(() => {
-    if (selectedUser && selectedUser.adminNote !== undefined) setUserNote(selectedUser.adminNote);
-    else setUserNote('');
-  }, [selectedUser]);
 
   const exportCSV = () => {
     const header = ['User ID', 'Email', 'Plan', 'Price', 'Duration', 'Status', 'Payments'];
@@ -247,1450 +286,163 @@ const AdminDashboard = () => {
     setModalOpen(true);
   };
 
-  const handleEditChange = (e) => {
-    const { name, value } = e.target;
-    if (name.startsWith('address.')) {
-      const key = name.split('.')[1];
-      setEditForm(f => ({ ...f, address: { ...f.address, [key]: value } }));
-    } else {
-      setEditForm(f => ({ ...f, [name]: value }));
-    }
+  // Filter bookings for the Bookings tab (all except paid and rejected)
+  const bookingsForBookingsTab = bookings.filter(b => b?.status !== 'paid' && b?.status !== 'rejected');
+
+  // Filter bookings for the History tab (only completed/paid)
+  const bookingHistory = bookings.filter(b => b?.status === 'completed' || b?.status === 'paid');
+
+  // Function to update bookings state from child components
+  const handleBookingsChange = (updatedBookings: Booking[]) => {
+    setBookings(updatedBookings);
   };
 
-  const handleSave = async () => {
-    setModalLoading(true);
-    setModalMsg('');
-    try {
-      const docRef = doc(db, 'users', selectedUser.id);
-      await updateDoc(docRef, {
-        name: editForm.name,
-        phone: editForm.phone,
-        address: editForm.address,
-        planName: editForm.planName,
-        planPrice: editForm.planPrice,
-        planDuration: editForm.planDuration,
-        planStatus: editForm.planStatus,
-        usage: editForm.usage,
-      });
-      setModalMsg('Profile updated!');
-      setUsers(users => users.map(u => u.id === selectedUser.id ? { ...u, ...editForm } : u));
-    } catch (err) {
-      setModalMsg('Failed to update profile.');
-    }
-    setModalLoading(false);
+  // Function to update messages state from child components
+  const handleMessagesChange = (updatedMessages: Message[]) => {
+    setMessages(updatedMessages);
   };
 
-  const handleDelete = async () => {
-    if (!window.confirm('Are you sure you want to delete this user?')) return;
-    setModalLoading(true);
-    setModalMsg('');
-    try {
-      await deleteDoc(doc(db, 'users', selectedUser.id));
-      setUsers(users => users.filter(u => u.id !== selectedUser.id));
-      setModalOpen(false);
-    } catch (err) {
-      setModalMsg('Failed to delete user.');
-    }
-    setModalLoading(false);
-  };
+  if (loading) {
+    return <div className="text-center py-10">Loading...</div>;
+  }
 
-  const handleAddPayment = async () => {
-    if (!newPayment.date || !newPayment.amount || !newPayment.status) return;
-    setModalLoading(true);
-    setModalMsg('');
-    try {
-      const docRef = doc(db, 'users', selectedUser.id);
-      const updatedPayments = [ ...(selectedUser.payments || []), { ...newPayment } ];
-      await updateDoc(docRef, { payments: updatedPayments });
-      setUsers(users => users.map(u => u.id === selectedUser.id ? { ...u, payments: updatedPayments } : u));
-      setSelectedUser(u => ({ ...u, payments: updatedPayments }));
-      setNewPayment({ date: '', amount: '', status: '' });
-      setModalMsg('Payment added!');
-    } catch (err) {
-      setModalMsg('Failed to add payment.');
-    }
-    setModalLoading(false);
-  };
-
-  const handleRemovePayment = async (idx) => {
-    setModalLoading(true);
-    setModalMsg('');
-    try {
-      const updatedPayments = (selectedUser.payments || []).filter((_, i) => i !== idx);
-      const docRef = doc(db, 'users', selectedUser.id);
-      await updateDoc(docRef, { payments: updatedPayments });
-      setUsers(users => users.map(u => u.id === selectedUser.id ? { ...u, payments: updatedPayments } : u));
-      setSelectedUser(u => ({ ...u, payments: updatedPayments }));
-      setModalMsg('Payment removed!');
-    } catch (err) {
-      setModalMsg('Failed to remove payment.');
-    }
-    setModalLoading(false);
-  };
-
-  const handleMarkRead = async (id, read) => {
-    await updateContactDoc(doc(db, 'contact_messages', id), { read });
-    setMessages(msgs => msgs.map(m => m.id === id ? { ...m, read } : m));
-  };
-  const handleDeleteMsg = async (id) => {
-    await deleteDoc(doc(db, 'contact_messages', id));
-    setMessages(msgs => msgs.filter(m => m.id !== id));
-  };
-
-  const handleReplyChange = (id, value) => {
-    setReplyInputs(inputs => ({ ...inputs, [id]: value }));
-  };
-  const handleSendReply = async (msg) => {
-    const reply = replyInputs[msg.id]?.trim();
-    if (!reply) return;
-    const docRef = doc(db, 'contact_messages', msg.id);
-    const newReply = {
-      text: reply,
-      admin: user?.email || 'admin',
-      date: new Date().toISOString(),
-    };
-    const prevReplies = msg.replies || [];
-    await updateContactDoc(docRef, { replies: [...prevReplies, newReply] });
-    setMessages(msgs => msgs.map(m => m.id === msg.id ? { ...m, replies: [...prevReplies, newReply] } : m));
-    setReplyInputs(inputs => ({ ...inputs, [msg.id]: '' }));
-  };
-
-  // Filtered users
-  const filteredUsers = users.filter(u => {
-    const matchesSearch =
-      (!search ||
-        (u.email && u.email.toLowerCase().includes(search.toLowerCase())) ||
-        (u.name && u.name.toLowerCase().includes(search.toLowerCase())));
-    const matchesPlan = !planFilter || u.planName === planFilter;
-    const matchesStatus = !statusFilter || u.planStatus === statusFilter;
-    return matchesSearch && matchesPlan && matchesStatus;
-  });
-
-  // Paginated users/messages
-  const paginatedUsers = filteredUsers.slice((userPage-1)*USERS_PER_PAGE, userPage*USERS_PER_PAGE);
-
-  const filteredMessages = messages.filter(m =>
-    (!msgSearch ||
-      m.email?.toLowerCase().includes(msgSearch.toLowerCase()) ||
-      m.name?.toLowerCase().includes(msgSearch.toLowerCase()) ||
-      m.subject?.toLowerCase().includes(msgSearch.toLowerCase()) ||
-      m.message?.toLowerCase().includes(msgSearch.toLowerCase()))
-  );
-
-  // Paginated messages
-  const paginatedMessages = filteredMessages.slice((msgPage-1)*MSGS_PER_PAGE, msgPage*MSGS_PER_PAGE);
-
-  // Reset page on filter/search change
-  useEffect(() => { setUserPage(1); }, [search, planFilter, statusFilter]);
-  useEffect(() => { setMsgPage(1); }, [msgSearch]);
-
-  const exportFeedbackCSV = () => {
-    const header = ['Name', 'Email', 'Subject', 'Message', 'Date', 'Status', 'Replies'];
-    const rows = paginatedMessages.map(m => [
-      m.name || '',
-      m.email || '',
-      m.subject || '',
-      m.message || '',
-      m.createdAt?.seconds ? new Date(m.createdAt.seconds * 1000).toLocaleString() : '',
-      m.read ? 'Read' : 'Unread',
-      (m.replies || []).map(r => `${r.admin} (${r.date}): ${r.text}`).join(' | ')
-    ]);
-    const csv = [header, ...rows].map(r => r.map(x => `"${x}"`).join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'feedback_messages.csv';
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  // Bulk user actions
-  const handleUserSelect = (id) => {
-    setSelectedUserIds(ids => ids.includes(id) ? ids.filter(i => i !== id) : [...ids, id]);
-  };
-  const handleUserSelectAll = () => {
-    const ids = paginatedUsers.map(u => u.id);
-    setSelectedUserIds(selectedUserIds.length === ids.length ? [] : ids);
-  };
-  const handleBulkDeleteUsers = async () => {
-    if (!window.confirm('Delete selected users?')) return;
-    for (const id of selectedUserIds) {
-      await deleteDoc(doc(db, 'users', id));
-    }
-    setUsers(users => users.filter(u => !selectedUserIds.includes(u.id)));
-    setSelectedUserIds([]);
-  };
-  // Bulk message actions
-  const handleMsgSelect = (id) => {
-    setSelectedMsgIds(ids => ids.includes(id) ? ids.filter(i => i !== id) : [...ids, id]);
-  };
-  const handleMsgSelectAll = () => {
-    const ids = paginatedMessages.map(m => m.id);
-    setSelectedMsgIds(selectedMsgIds.length === ids.length ? [] : ids);
-  };
-  const handleBulkDeleteMsgs = async () => {
-    if (!window.confirm('Delete selected messages?')) return;
-    for (const id of selectedMsgIds) {
-      await deleteDoc(doc(db, 'contact_messages', id));
-    }
-    setMessages(msgs => msgs.filter(m => !selectedMsgIds.includes(m.id)));
-    setSelectedMsgIds([]);
-  };
-  const handleBulkMarkRead = async (read) => {
-    for (const id of selectedMsgIds) {
-      await updateContactDoc(doc(db, 'contact_messages', id), { read });
-    }
-    setMessages(msgs => msgs.map(m => selectedMsgIds.includes(m.id) ? { ...m, read } : m));
-    setSelectedMsgIds([]);
-  };
-  const handleBulkExportMsgs = () => {
-    const header = ['Name', 'Email', 'Subject', 'Message', 'Date', 'Status', 'Replies'];
-    const rows = paginatedMessages.filter(m => selectedMsgIds.includes(m.id)).map(m => [
-      m.name || '',
-      m.email || '',
-      m.subject || '',
-      m.message || '',
-      m.createdAt?.seconds ? new Date(m.createdAt.seconds * 1000).toLocaleString() : '',
-      m.read ? 'Read' : 'Unread',
-      (m.replies || []).map(r => `${r.admin} (${r.date}): ${r.text}`).join(' | ')
-    ]);
-    const csv = [header, ...rows].map(r => r.map(x => `"${x}"`).join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'selected_feedback_messages.csv';
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handleSaveUserNote = async () => {
-    setUserNoteSaving(true);
-    try {
-      await updateDoc(doc(db, 'users', selectedUser.id), { adminNote: userNote });
-      setUsers(users => users.map(u => u.id === selectedUser.id ? { ...u, adminNote: userNote } : u));
-    } finally {
-      setUserNoteSaving(false);
-    }
-  };
-  // Feedback message notes
-  const handleMsgNoteChange = (id, value) => {
-    setMsgNotes(notes => ({ ...notes, [id]: value }));
-  };
-  const handleSaveMsgNote = async (msg) => {
-    setMsgNoteSaving(s => ({ ...s, [msg.id]: true }));
-    await updateContactDoc(doc(db, 'contact_messages', msg.id), { adminNote: msgNotes[msg.id] });
-    setMessages(msgs => msgs.map(m => m.id === msg.id ? { ...m, adminNote: msgNotes[msg.id] } : m));
-    setMsgNoteSaving(s => ({ ...s, [msg.id]: false }));
-  };
-
-  // User impersonation
-  const handleImpersonate = (userId) => {
-    window.open(`/dashboard?impersonate=${userId}`, '_blank');
-  };
-
-  // Copy to clipboard helper
-  const copyToClipboard = (text) => {
-    navigator.clipboard.writeText(text);
-  };
-
-  const [showAllUserPayments, setShowAllUserPayments] = useState({ open: false, user: null });
-
-  const [bookings, setBookings] = useState([]);
-  const [bookingActionLoading, setBookingActionLoading] = useState('');
-  const [rejectReason, setRejectReason] = useState('');
-  const [showRejectModal, setShowRejectModal] = useState({ open: false, booking: null });
-
-  // Fetch bookings
-  useEffect(() => {
-    if (tab !== 'bookings') return;
-    getDocs(collection(db, 'bookings')).then(snap => {
-      setBookings(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    });
-  }, [tab]);
-
-  // Accept booking
-  const handleAcceptBooking = async (booking) => {
-    setBookingActionLoading(booking.id);
-    await updateDoc(doc(db, 'bookings', booking.id), { 
-      status: 'accepted',
-      acceptedAt: new Date().toISOString()
-    });
-    setBookings(bks => bks.map(b => b.id === booking.id ? { 
-      ...b, 
-      status: 'accepted',
-      acceptedAt: new Date().toISOString()
-    } : b));
-
-    // Add notification to user
-    if (booking.email) {
-      const notifRef = collection(db, 'users');
-      const userSnap = await getDocs(notifRef);
-      const userDoc = userSnap.docs.find(u => u.data().email === booking.email);
-      if (userDoc) {
-        await addDoc(collection(db, 'users', userDoc.id, 'notifications'), {
-          title: 'Booking Accepted',
-          body: `Your booking for ${booking.service} has been accepted! We'll update the usage after processing.`,
-          type: 'booking',
-          name: booking.name || '',
-          service: booking.service || '',
-          read: false,
-          createdAt: Timestamp.now(),
-        });
-      }
-    }
-    setBookingActionLoading('');
-  };
-
-  // Add new function to update usage after weighing
-  const handleUpdateUsage = (booking) => {
-    // Try to find the user by username or email
-    const user = users.find(
-      u => u.name === booking.username || u.email === booking.email
-    );
-    setUsageModal({ 
-      open: true, 
-      user: user ? { 
-        id: user.id,
-        planName: user.planName,
-        planKG: user.planKG,
-        planBalance: user.planBalance,
-        email: user.email,
-        name: user.name
-      } : null,
-      value: '',
-      bookingId: booking.id
-    });
-  };
-
-  // Reject booking
-  const handleRejectBooking = async (booking, reason) => {
-    console.log('[RejectBooking] Called with:', booking, reason);
-    setBookingActionLoading(booking.id);
-    try {
-      if (!booking || !booking.id) {
-        console.error('[RejectBooking] Invalid booking object:', booking);
-        alert('Error: Invalid booking object.');
-        setBookingActionLoading('');
-        return;
-      }
-      await updateDoc(doc(db, 'bookings', booking.id), { status: 'rejected', rejectReason: reason });
-      setBookings(bks => bks.map(b => b.id === booking.id ? { ...b, status: 'rejected', rejectReason: reason } : b));
-      // Add notification to user
-      if (booking.email) {
-        try {
-          const notifRef = collection(db, 'users');
-          const userSnap = await getDocs(notifRef);
-          const userDoc = userSnap.docs.find(u => u.data().email === booking.email);
-          if (userDoc) {
-            await addDoc(collection(db, 'users', userDoc.id, 'notifications'), {
-              title: 'Booking Rejected',
-              body: `Your booking for ${booking.service} was rejected.${reason ? ' Reason: ' + reason : ''}`,
-              type: 'booking',
-              read: false,
-              createdAt: Timestamp.now(),
-            });
-          } else {
-            console.warn('[RejectBooking] No user found for email:', booking.email);
-          }
-        } catch (notifErr) {
-          console.error('[RejectBooking] Error adding notification:', notifErr);
-          alert('Error adding notification to user. See console for details.');
-        }
-      } else {
-        console.warn('[RejectBooking] Booking has no email:', booking);
-      }
-    } catch (err) {
-      console.error('[RejectBooking] Error updating booking:', err);
-      alert('Error rejecting booking. See console for details.');
-    }
-    setBookingActionLoading('');
-    setShowRejectModal({ open: false, booking: null });
-    setRejectReason('');
-  };
-
-  const [analyticsTab, setAnalyticsTab] = useState('bookings');
-  const [analyticsData, setAnalyticsData] = useState({ bookings: [], payments: [], topServices: [], topUsers: [] });
-
-  // Fetch analytics data
-  useEffect(() => {
-    if (tab !== 'analytics') return;
-    // Bookings over time
-    getDocs(collection(db, 'bookings')).then(snap => {
-      const bookings = snap.docs.map(doc => doc.data());
-      // Group by date
-      const bookingsByDate = {};
-      bookings.forEach(b => {
-        const date = b.createdAt?.seconds ? new Date(b.createdAt.seconds * 1000).toLocaleDateString() : 'Unknown';
-        bookingsByDate[date] = (bookingsByDate[date] || 0) + 1;
-      });
-      const bookingsOverTime = Object.entries(bookingsByDate).map(([date, count]) => ({ date, count }));
-      // Top services
-      const serviceCounts = {};
-      bookings.forEach(b => {
-        if (b.service) serviceCounts[b.service] = (serviceCounts[b.service] || 0) + 1;
-      });
-      const topServices = Object.entries(serviceCounts).map(([service, count]) => ({ service, count }));
-      // Top users
-      const userCounts = {};
-      bookings.forEach(b => {
-        if (b.email) userCounts[b.email] = (userCounts[b.email] || 0) + 1;
-      });
-      const topUsers = Object.entries(userCounts).map(([email, count]) => ({ email, count }));
-      // Payments over time
-      getDocs(collection(db, 'users')).then(userSnap => {
-        let payments = [];
-        userSnap.docs.forEach(u => {
-          (u.data().payments || []).forEach(p => {
-            payments.push(p);
-          });
-        });
-        const paymentsByDate = {};
-        payments.forEach(p => {
-          const date = p.date ? new Date(p.date).toLocaleDateString() : 'Unknown';
-          paymentsByDate[date] = (paymentsByDate[date] || 0) + 1;
-        });
-        const paymentsOverTime = Object.entries(paymentsByDate).map(([date, count]) => ({ date, count }));
-        setAnalyticsData({ bookings: bookingsOverTime, payments: paymentsOverTime, topServices, topUsers });
-      });
-    });
-  }, [tab]);
-
-  const [planRequests, setPlanRequests] = useState<PlanRequestUser[]>([]);
-  const [planReqTabLoading, setPlanReqTabLoading] = useState(false);
-  const [planRequestStatusFilter, setPlanRequestStatusFilter] = useState('');
-  const [planRequestSearch, setPlanRequestSearch] = useState('');
-  const [rejectModal, setRejectModal] = useState({ open: false, user: null, reason: '' });
-
-  // Fetch all plan requests (not just pending)
-  useEffect(() => {
-    if (tab !== 'requests') return;
-    setPlanReqTabLoading(true);
-    getDocs(collection(db, 'users')).then(snap => {
-      const reqs = snap.docs
-        .map(docSnap => ({ id: docSnap.id, ...(docSnap.data() as any) }))
-        .filter(u => u.planRequest)
-        .map(u => ({
-          id: u.id,
-          name: u.name,
-          email: u.email,
-          planRequest: u.planRequest
-        })) as PlanRequestUser[];
-      setPlanRequests(reqs);
-      setPlanReqTabLoading(false);
-    });
-  }, [tab]);
-
-  const handleApproveRequest = async (user) => {
-    const userRef = doc(db, 'users', user.id);
-
-    // Determine plan type
-    const isElitePlus = user.planRequest.plan === 'Elite Plus';
-
-    // Build update object
-    const updateObj: any = {
-      planName: user.planRequest.plan,
-      planPrice: user.planRequest.price,
-      planDuration: user.planRequest.duration,
-      planStatus: 'Active',
-      planConditioner: user.planRequest.conditioner || '',
-      planPaymentMethod: user.planRequest.paymentMethod,
-      planTxnId: user.planRequest.txnId || '',
-      planActivatedAt: new Date().toISOString(),
-      planRequest: { ...user.planRequest, status: 'approved', approvedAt: new Date().toISOString() },
-      planKG: undefined,
-      usage: undefined,
-      amountUsed: undefined,
-    };
-
-    if (isElitePlus) {
-      updateObj.planKG = user.planRequest.kgLimit;
-      updateObj.usage = 0;
-      updateObj.amountUsed = 0;
-    } else {
-      updateObj.planKG = 0;
-      updateObj.usage = 0;
-      updateObj.amountUsed = 0;
-    }
-
-    await updateDoc(userRef, updateObj);
-
-    // Add payment entry
-    const userSnap = await getDoc(userRef);
-    const prevPayments = userSnap.exists() ? (userSnap.data().payments || []) : [];
-    const newPayment = {
-      date: new Date().toLocaleString(),
-      amount: user.planRequest.price,
-      status: 'Success',
-    };
-    await updateDoc(userRef, { payments: [...prevPayments, newPayment] });
-
-    // Add to bookings collection
-    await addDoc(collection(db, 'bookings'), {
-      userId: user.id || '',
-      name: user.name || user.email || 'Unknown',
-      username: user.username || '',
-      email: user.email || '',
-      planName: user.planRequest?.plan || '',
-      planPrice: user.planRequest?.price || 0,
-      planDuration: user.planRequest?.duration || '',
-      planKG: isElitePlus ? (user.planRequest?.kgLimit || 0) : 0,
-      planConditioner: user.planRequest?.conditioner || '',
-      planPaymentMethod: user.planRequest?.paymentMethod || '',
-      planTxnId: user.planRequest?.txnId || '',
-      status: 'accepted',
-      createdAt: new Date(),
-      customBookingId: nanoid(8),
-    });
-
-    // Add notification
-    await addDoc(collection(db, 'users', user.id, 'notifications'), {
-      title: 'Request Approved',
-      body: `Your ${user.planRequest.plan} request has been approved and moved to bookings!`,
-      type: 'plan',
-      read: false,
-      createdAt: Timestamp.now(),
-    });
-
-    setPlanRequests(reqs => reqs.map(u2 => u2.id === user.id ? { ...u2, planRequest: { ...u2.planRequest, status: 'approved', approvedAt: new Date().toISOString() } } : u2));
-  };
-  const handleRejectPlanRequest = async (user, reason) => {
-    const userRef = doc(db, 'users', user.id);
-    await updateDoc(userRef, {
-      planRequest: { ...user.planRequest, status: 'rejected', rejectedAt: new Date().toISOString(), rejectReason: reason }
-    });
-    await addDoc(collection(db, 'users', user.id, 'notifications'), {
-      title: 'Plan Request Rejected',
-      body: `Your ${user.planRequest.plan} plan request was rejected.${reason ? ' Reason: ' + reason : ''}`,
-      type: 'plan',
-      read: false,
-      createdAt: Timestamp.now(),
-    });
-    setPlanRequests(reqs => reqs.map(u2 => u2.id === user.id ? { ...u2, planRequest: { ...u2.planRequest, status: 'rejected', rejectedAt: new Date().toISOString(), rejectReason: reason } } : u2));
-    setRejectModal({ open: false, user: null, reason: '' });
-  };
-
-  const filteredPlanRequests = planRequests.filter(u => {
-    const matchesStatus = !planRequestStatusFilter || u.planRequest.status === planRequestStatusFilter;
-    const matchesSearch = !planRequestSearch || (u.name?.toLowerCase().includes(planRequestSearch.toLowerCase()) || u.email?.toLowerCase().includes(planRequestSearch.toLowerCase()));
-    return matchesStatus && matchesSearch;
-  });
-
-  // Add state for usage modal
-  const [usageModal, setUsageModal] = useState({ open: false, user: null, value: '', bookingId: null });
-
-  // Add button in user row to open usage modal
-  const handleUsageModal = (user) => {
-    setUsageModal({ open: true, user, value: '', bookingId: null });
-  };
-
-  // Add deduction logic
-  const handleDeductUsage = async () => {
-    if (!usageModal.user || !usageModal.user.id) {
-      alert('User not found for deduction!');
-      return;
-    }
-    if (!usageModal.bookingId) {
-      alert('Booking not found for deduction!');
-      return;
-    }
-    const userRef = doc(db, 'users', usageModal.user.id);
-    const bookingRef = doc(db, 'bookings', usageModal.bookingId);
-
-    try {
-      // Update user's usage or amountUsed field
-      if (usageModal.user.planName === 'Elite Plus') {
-        // KG-based plan: increment usage
-        const userSnap = await getDoc(userRef);
-        const prevUsage = userSnap.exists() ? (userSnap.data().usage || 0) : 0;
-        const newUsage = prevUsage + Number(usageModal.value);
-        await updateDoc(userRef, { usage: newUsage });
-      } else {
-        // Amount-based plan: increment amountUsed
-        const userSnap = await getDoc(userRef);
-        const prevAmount = userSnap.exists() ? (userSnap.data().amountUsed || 0) : 0;
-        const newAmount = prevAmount + Number(usageModal.value);
-        await updateDoc(userRef, { amountUsed: newAmount });
-      }
-
-      // Update booking status and add usage
-      await updateDoc(bookingRef, {
-        status: 'awaiting_payment',
-        usage: Number(usageModal.value),
-        amountDue: Number(usageModal.value),
-        acceptedAt: new Date().toISOString(),
-      });
-
-      // Update local state
-      setBookings(bks => bks.map(b => b.id === usageModal.bookingId ? {
-        ...b,
-        status: 'awaiting_payment',
-        usage: Number(usageModal.value),
-        acceptedAt: new Date().toISOString(),
-      } : b));
-
-      // Add notification to user
-      if (usageModal.user.email) {
-        const notifRef = collection(db, 'users');
-        const userSnap = await getDocs(notifRef);
-        const userDoc = userSnap.docs.find(u => u.data().email === usageModal.user.email);
-        if (userDoc) {
-          await addDoc(collection(db, 'users', userDoc.id, 'notifications'), {
-            title: 'Booking Usage Updated',
-            body: `Your booking usage has been updated: ${usageModal.value} ${usageModal.user.planName === 'Elite Plus' ? 'KG' : '₹'} has been deducted from your balance.`,
-            type: 'booking',
-            name: usageModal.user.name || '',
-            service: '',
-            read: false,
-            createdAt: Timestamp.now(),
-          });
-        }
-      }
-
-      setUsageModal({ open: false, user: null, value: '', bookingId: null });
-    } catch (error) {
-      console.error('Error updating booking:', error);
-      alert('Error updating booking usage. Please try again.');
-    }
-  };
-
-  // Add new state for history tab
-  const [historyTab, setHistoryTab] = useState('all');
-  const [historySearch, setHistorySearch] = useState('');
-  const [bookingSearch, setBookingSearch] = useState('');
-  const [userSearch, setUserSearch] = useState('');
-
-  // 1. Filter requests: Only show pending in Requests tab
-  const filteredRequests = planRequests.filter(u => u.planRequest.status === 'pending' && (!planRequestSearch || (u.name?.toLowerCase().includes(planRequestSearch.toLowerCase()) || u.email?.toLowerCase().includes(planRequestSearch.toLowerCase()))));
-
-  // 2. In History tab, show both completed and rejected requests
-  const historyRequests = planRequests.filter(u => u.planRequest.status === 'rejected' || u.planRequest.status === 'completed');
-
-  // Add state for notification dropdown
-  const [notifDropdownOpen, setNotifDropdownOpen] = useState(false);
-  const [unreadCount, setUnreadCount] = useState(0);
-
-  // Mark all notifications as read when dropdown is opened
-  useEffect(() => {
-    if (notifDropdownOpen) {
-      setNotifications(n => n.map(notif => ({ ...notif, read: true })));
-      setUnreadCount(0);
-    } else {
-      setUnreadCount(notifications.filter(n => !n.read).length);
-    }
-  }, [notifDropdownOpen, notifications]);
-
-  const handleCompleteOrder = (booking) => {
-    // TODO: Implement order completion logic
-    alert(`Order for ${booking.name || booking.email} marked as complete!`);
-  };
-
-  const notifDropdownRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!notifDropdownOpen) return;
-    function handleClickOutside(event: MouseEvent) {
-      if (
-        notifDropdownRef.current &&
-        !notifDropdownRef.current.contains(event.target as Node)
-      ) {
-        setNotifDropdownOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [notifDropdownOpen]);
-
-  const [adminNotifications, setAdminNotifications] = useState([]);
-
-  // Fetch admin notifications in real-time
-  useEffect(() => {
-    const unsub = onSnapshot(collection(db, 'admin_notifications'), (snap) => {
-      setAdminNotifications(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    });
-    return () => unsub();
-  }, []);
-
-  const handleAdminNotifClick = async (notif) => {
-    // Mark as read in Firestore
-    await updateDoc(doc(db, 'admin_notifications', notif.id), { read: true });
-    setAdminNotifications(nots => nots.map(n => n.id === notif.id ? { ...n, read: true } : n));
-    // Navigate to relevant tab
-    if (notif.type === 'booking') setTab('bookings');
-    else if (notif.type === 'payment') setTab('bookings');
-    else if (notif.type === 'feedback') setTab('feedback');
-    // Add more types as needed
-  };
-
-  useEffect(() => {
-    console.log('[Modal State Changed]', showRejectModal);
-  }, [showRejectModal]);
-
-  const [addPaymentModal, setAddPaymentModal] = useState({ open: false, user: null });
-  const [addPaymentAmount, setAddPaymentAmount] = useState('');
-  const [addPaymentStatus, setAddPaymentStatus] = useState('Success');
-
-  const handleAddPaymentManually = () => {
-    setUsers(users => users.map(u => u.id === addPaymentModal.user.id ? { ...u, payments: [...u.payments, { date: new Date().toLocaleString(), amount: addPaymentAmount, status: addPaymentStatus }] } : u));
-    setAddPaymentModal({ open: false, user: null });
-    setAddPaymentAmount('');
-    setAddPaymentStatus('Success');
-  };
-
-  // Add the fix3000PlanPayments function
-  const fix3000PlanPayments = async () => {
-    const affectedUsers = users.filter(u => Number(u.planPrice) === 3000 && (!u.payments || u.payments.length === 0));
-    for (const u of affectedUsers) {
-      const userRef = doc(db, 'users', u.id);
-      const newPayment = {
-        date: new Date().toLocaleString(),
-        amount: 3000,
-        status: 'Success',
-      };
-      await updateDoc(userRef, { payments: [newPayment] });
-      setUsers(users => users.map(user => user.id === u.id ? { ...user, payments: [newPayment] } : user));
-    }
-    alert(`Fixed payments for ${affectedUsers.length} user(s) with ₹3000 plan.`);
-  };
-
-  const handleSetAmountDue = async () => {
-    if (!usageModal.bookingId) {
-      alert('Booking not found!');
-      return;
-    }
-    const bookingRef = doc(db, 'bookings', usageModal.bookingId);
-    try {
-      // For users with no plan, keep in Bookings tab with awaiting_payment status
-      await updateDoc(bookingRef, {
-        status: 'awaiting_payment',
-        amountDue: Number(usageModal.value),
-        acceptedAt: new Date().toISOString(),
-        isNoPlanBooking: true // Add flag to identify no-plan bookings
-      });
-      
-      // Update local state - keep in Bookings tab
-      setBookings(bks => bks.map(b => b.id === usageModal.bookingId ? {
-        ...b,
-        status: 'awaiting_payment',
-        amountDue: Number(usageModal.value),
-        acceptedAt: new Date().toISOString(),
-        isNoPlanBooking: true
-      } : b));
-      
-      setUsageModal({ open: false, user: null, value: '', bookingId: null });
-      toast.success('Amount due set! Booking will remain in Bookings tab until payment is received.');
-    } catch (error) {
-      console.error('Error setting amount due:', error);
-      toast.error('Error setting amount due. Please try again.');
-    }
-  };
-
-  const [userSortOrder, setUserSortOrder] = useState('recent');
-  const [bookingSortOrder, setBookingSortOrder] = useState('recent');
-  const [historySortOrder, setHistorySortOrder] = useState('recent');
-  const [feedbackSortOrder, setFeedbackSortOrder] = useState('recent');
-
-  const filteredBookings = bookings.filter(b =>
-    (!bookingSearch ||
-      (b.customBookingId && b.customBookingId.toLowerCase().includes(bookingSearch.toLowerCase())) ||
-      (b.name && b.name.toLowerCase().includes(bookingSearch.toLowerCase())) ||
-      (b.email && b.email.toLowerCase().includes(bookingSearch.toLowerCase())))
-  );
-
-  if (loading) return <div className="flex justify-center items-center h-64">Loading...</div>;
-  if (error) return <div className="text-red-600 text-center mt-8">{error}</div>;
+  if (error) {
+    return <div className="text-center py-10 text-red-600">Error: {error}</div>;
+  }
 
   return (
     <div className="max-w-5xl mx-auto py-16 px-2 md:px-4 pt-24">
       <h1 className="text-4xl font-extrabold mb-6 text-blue-700 text-center tracking-tight drop-shadow">Admin Dashboard</h1>
       {/* Analytics Bar */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 md:gap-4 mb-6 md:mb-8">
-        <div className="bg-blue-50 rounded-xl p-2 md:p-4 text-center flex flex-col items-center shadow">
-          <Users className="w-6 h-6 text-blue-400 mb-1" />
-          <div className="text-xl md:text-2xl font-bold text-blue-700">{totalUsers}</div>
-          <div className="text-xs text-gray-600">Total Users</div>
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+        <div className="bg-blue-100 rounded-xl p-4 shadow flex items-center">
+          <Users className="text-blue-600 mr-4" size={28} />
+          <div>
+            <div className="text-lg font-bold text-blue-800">{totalUsers}</div>
+            <div className="text-sm text-blue-600">Total Users</div>
         </div>
-        <div className="bg-green-50 rounded-xl p-2 md:p-4 text-center flex flex-col items-center shadow">
-          <TrendingUp className="w-6 h-6 text-green-400 mb-1" />
-          <div className="text-xl md:text-2xl font-bold text-green-700">{activePlans}</div>
-          <div className="text-xs text-gray-600">Active Plans</div>
         </div>
-        <div className="bg-yellow-50 rounded-xl p-2 md:p-4 text-center flex flex-col items-center shadow">
-          <CreditCard className="w-6 h-6 text-yellow-400 mb-1" />
-          <div className="text-xl md:text-2xl font-bold text-yellow-700">₹{totalPayments}</div>
-          <div className="text-xs text-gray-600">Total Payments</div>
+        <div className="bg-green-100 rounded-xl p-4 shadow flex items-center">
+          <TrendingUp className="text-green-600 mr-4" size={28} />
+          <div>
+            <div className="text-lg font-bold text-green-800">{activePlans}</div>
+            <div className="text-sm text-green-600">Active Plans</div>
         </div>
-        <div className="bg-purple-50 rounded-xl p-2 md:p-4 text-center flex flex-col items-center shadow">
-          <MessageCircle className="w-6 h-6 text-purple-400 mb-1" />
-          <div className="text-xl md:text-2xl font-bold text-purple-700">{feedbackCount}</div>
-          <div className="text-xs text-gray-600">Feedback</div>
         </div>
-        <div className="bg-red-50 rounded-xl p-2 md:p-4 text-center flex flex-col items-center shadow">
-          <UserCircle className="w-6 h-6 text-red-400 mb-1" />
-          <div className="text-xl md:text-2xl font-bold text-red-700">{unreadFeedback}</div>
-          <div className="text-xs text-gray-600">Unread Feedback</div>
+        <div className="bg-yellow-100 rounded-xl p-4 shadow flex items-center">
+          <CreditCard className="text-yellow-600 mr-4" size={28} />
+          <div>
+            <div className="text-lg font-bold text-yellow-800">₹{totalPayments.toFixed(2)}</div>
+            <div className="text-sm text-yellow-600">Total Payments</div>
         </div>
       </div>
-      <div className="mb-8 border-b border-blue-100"></div>
-      {/* Tab Buttons */}
-      <div className="flex gap-4 mb-8 justify-center">
-        <Button onClick={() => setTab('users')} variant={tab === 'users' ? 'default' : 'outline'} className="rounded-full px-6 py-2 text-base shadow-sm">Users</Button>
-        <Button onClick={() => setTab('bookings')} variant={tab === 'bookings' ? 'default' : 'outline'} className="rounded-full px-6 py-2 text-base shadow-sm">Bookings</Button>
-        <Button onClick={() => setTab('history')} variant={tab === 'history' ? 'default' : 'outline'} className="rounded-full px-6 py-2 text-base shadow-sm">History</Button>
-        <Button onClick={() => setTab('requests')} variant={tab === 'requests' ? 'default' : 'outline'} className="rounded-full px-6 py-2 text-base shadow-sm">Requests</Button>
-        <Button onClick={() => setTab('analytics')} variant={tab === 'analytics' ? 'default' : 'outline'} className="rounded-full px-6 py-2 text-base shadow-sm">Analytics</Button>
-        <Button onClick={() => setTab('feedback')} variant={tab === 'feedback' ? 'default' : 'outline'} className="rounded-full px-6 py-2 text-base shadow-sm">Feedback & Support</Button>
-      </div>
-      {/* Users Tab */}
-      {tab === 'users' && (
-        <div className="bg-white rounded-2xl shadow-xl p-4 md:p-8 border border-blue-100">
-          <h2 className="text-2xl font-bold mb-4 text-blue-700">All Users</h2>
-          <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-4 mb-4 md:mb-6">
-            <Input
-              type="text"
-              placeholder="Search by User ID, name, or email"
-              value={userSearch}
-              onChange={e => setUserSearch(e.target.value)}
-              className="w-full md:w-64"
-            />
-            <TabSortOptions tab="users" sortOrder={userSortOrder} onSortChange={setUserSortOrder} />
-          </div>
-          <div className="overflow-x-auto rounded-lg">
-            <table className="min-w-[900px] md:min-w-full bg-white rounded-lg shadow text-xs md:text-base">
-              <thead className="bg-blue-50">
-                <tr>
-                  <th className="py-2 px-4">User ID</th>
-                  <th className="py-2 px-4">User</th>
-                  <th className="py-2 px-4">Plan</th>
-                  <th className="py-2 px-4">Price</th>
-                  <th className="py-2 px-4">Duration</th>
-                  <th className="py-2 px-4">Status</th>
-                  <th className="py-2 px-4">Payments</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortUsers(filteredUsers, userSortOrder)
-                  .slice((userPage-1)*USERS_PER_PAGE, userPage*USERS_PER_PAGE)
-                  .map((u, i) => (
-                    <tr key={u.id} className={i % 2 === 0 ? 'bg-gray-50 hover:bg-gray-100 transition' : 'hover:bg-gray-100 transition'}>
-                      <td className="py-2 px-4 align-middle font-mono text-xs text-blue-700 font-bold">{u.id}</td>
-                      <td className="py-2 px-4 align-middle">
-                        <div className="flex items-center gap-3">
-                          <Avatar className="w-8 h-8 text-base">
-                            <AvatarFallback>{(u.username || u.name || u.email || 'U')[0]}</AvatarFallback>
-                          </Avatar>
+        <div className="bg-purple-100 rounded-xl p-4 shadow flex items-center">
+          <MessageCircle className="text-purple-600 mr-4" size={28} />
                           <div>
-                            {u.username && <div className="font-bold text-base text-gray-900">{u.username}</div>}
-                            {u.name && <div className="text-sm text-gray-700">{u.name}</div>}
-                            {u.email && <div className="text-xs text-gray-500">{u.email}</div>}
+            <div className="text-lg font-bold text-purple-800">{feedbackCount}</div>
+            <div className="text-sm text-purple-600">Feedback Received</div>
                           </div>
                         </div>
-                      </td>
-                      <td className="py-2 px-4 align-middle font-semibold text-blue-900">{u.planName}</td>
-                      <td className="py-2 px-4 align-middle">₹{u.planPrice}</td>
-                      <td className="py-2 px-4 align-middle">{u.planDuration}</td>
-                      <td className="py-2 px-4 align-middle">
-                        <span className={`inline-block px-2 py-1 rounded text-xs font-bold ${u.planStatus === 'Active' ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-gray-50 text-gray-500 border border-gray-200'}`}>{u.planStatus}</span>
-                      </td>
-                      <td className="py-2 px-4 align-middle">
-                        <div className="flex flex-col gap-2">
-                          {(u.payments || []).length === 0 && <span className="text-gray-400 text-xs">No payments</span>}
-                          {(u.payments || []).slice(0, 2).map((p, j) => (
-                            <div key={j} className="border border-gray-200 rounded p-2 bg-white flex flex-col gap-0.5 text-xs min-w-[140px]">
-                              <div className="text-gray-700 font-mono">{p.date}</div>
-                              <div className="flex items-center justify-between">
-                                <span className="font-semibold">₹{p.amount}</span>
-                                <span className={`ml-2 px-2 py-0.5 rounded text-xs font-bold ${p.status === 'Success' ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-gray-50 text-gray-500 border border-gray-200'}`}>{p.status}</span>
                               </div>
-                            </div>
-                          ))}
-                          {(u.payments || []).length > 2 && (
-                            <button
-                              className="mt-1 flex items-center gap-1 text-blue-700 hover:underline text-xs font-semibold"
-                              onClick={e => { e.stopPropagation(); setShowAllUserPayments({ open: true, user: u }); }}
-                              aria-label="View All Payments"
-                            >
-                              View All
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
-                            </button>
-                          )}
-                          {(u.payments || []).length === 0 && u.planPaymentMethod === 'cash' && (
-                            <Button size="sm" className="bg-yellow-600 text-white" onClick={e => { e.stopPropagation(); setAddPaymentModal({ open: true, user: u }); }}>
-                              Add Payment
-                            </Button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="flex justify-between items-center mt-4">
-            <Button onClick={() => setUserPage(p => Math.max(1, p-1))} disabled={userPage === 1}>Prev</Button>
-            <span>Page {userPage} of {Math.ceil(filteredUsers.length/USERS_PER_PAGE) || 1}</span>
-            <Button onClick={() => setUserPage(p => p+1)} disabled={userPage*USERS_PER_PAGE >= filteredUsers.length}>Next</Button>
-          </div>
-        </div>
-      )}
-      {/* Bookings Tab */}
-      {tab === 'bookings' && (
-        <div className="bg-white rounded-2xl shadow-xl p-4 md:p-8 border border-green-100">
-          <h2 className="text-2xl font-bold mb-4 text-green-700">All Bookings</h2>
-          <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-4 mb-4 md:mb-6">
-            <Input
-              type="text"
-              placeholder="Search by Booking ID, user name, or email"
-              value={bookingSearch}
-              onChange={e => setBookingSearch(e.target.value)}
-              className="w-full md:w-64"
-            />
-            <TabSortOptions tab="bookings" sortOrder={bookingSortOrder} onSortChange={setBookingSortOrder} />
-          </div>
-          <div className="overflow-x-auto rounded-lg">
-            <table className="min-w-[900px] md:min-w-full bg-white rounded-lg shadow text-xs md:text-base">
-              <thead className="bg-green-50">
-                <tr>
-                  <th className="py-2 px-4">Booking ID</th>
-                  <th className="py-2 px-4">Service</th>
-                  <th className="py-2 px-4">User</th>
-                  <th className="py-2 px-4">Pickup Date</th>
-                  <th className="py-2 px-4">Pickup Time</th>
-                  <th className="py-2 px-4">Address</th>
-                  <th className="py-2 px-4">Status</th>
-                  <th className="py-2 px-4">Created At</th>
-                  <th className="py-2 px-4">Usage</th>
-                  <th className="py-2 px-4">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortBookings(filteredBookings, bookingSortOrder)
-                  .map((b, i) => (
-                    <tr key={b.id} className={i % 2 === 0 ? 'bg-gray-50 hover:bg-gray-100 transition' : 'hover:bg-gray-100 transition'}>
-                      <td className="py-2 px-4 align-middle font-mono text-xs text-blue-700 font-bold">{b.customBookingId || '-'}</td>
-                      <td className="py-2 px-4 align-middle">{b.service}</td>
-                      <td className="py-2 px-4 align-middle">{b.username || b.name || b.email}</td>
-                      <td className="py-2 px-4 align-middle">{b.pickupDate}</td>
-                      <td className="py-2 px-4 align-middle">{b.pickupTime}</td>
-                      <td className="py-2 px-4 align-middle">{b.address}</td>
-                      <td className="py-2 px-4 align-middle">
-                        {b.status === 'awaiting_payment' && (
-                          <span className="inline-block px-2 py-1 rounded text-xs font-bold bg-yellow-50 text-yellow-700 border border-yellow-200">
-                            Awaiting Payment
-                          </span>
-                        )}
-                        {b.status === 'pending' && (
-                          <span className="inline-block px-2 py-1 rounded text-xs font-bold bg-yellow-50 text-yellow-700 border border-yellow-200">
-                            Pending
-                          </span>
-                        )}
-                        {b.status === 'accepted' && (
-                          <span className="inline-block px-2 py-1 rounded text-xs font-bold bg-green-50 text-green-700 border border-green-200">
-                            Accepted
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-2 px-4 align-middle font-mono text-xs text-gray-700">{b.createdAt?.seconds ? new Date(b.createdAt.seconds * 1000).toLocaleString() : ''}</td>
-                      <td className="py-2 px-4 align-middle">
-                        <span className="font-semibold">{b.usage} {b.planName === 'Elite Plus' ? 'KG' : '₹'}</span>
-                      </td>
-                      <td className="py-2 px-4 align-middle">
-                        {b.status === 'pending' && (
-                          <div className="flex gap-2">
-                            <Button size="sm" disabled={bookingActionLoading === b.id} onClick={() => handleAcceptBooking(b)} className="bg-green-600 text-white">Accept</Button>
-                            <Button size="sm" disabled={bookingActionLoading === b.id} onClick={() => { console.log('[Reject Button Clicked]', b); setShowRejectModal({ open: true, booking: b }); }} className="bg-red-600 text-white">Reject</Button>
-                          </div>
-                        )}
-                        {b.status === 'accepted' && !b.usage && (
-                          <Button 
-                            size="sm" 
-                            onClick={() => handleUpdateUsage(b)} 
-                            className="bg-blue-600 text-white"
-                          >
-                            Update Usage
-                          </Button>
-                        )}
-                        {b.status === 'accepted' && b.usage && (
-                          <Button size="sm" className="bg-purple-600 text-white" onClick={() => handleCompleteOrder(b)}>
-                            Complete Order
-                          </Button>
-                        )}
-                        {b.status === 'cash_pending' && (
-                          <Button size="sm" className="bg-yellow-600 text-white" onClick={async () => {
-                            // Mark booking as completed
-                            setBookingActionLoading(b.id);
-                            await updateDoc(doc(db, 'bookings', b.id), {
-                              status: 'completed',
-                              paidAt: new Date().toISOString(),
-                              completedAt: new Date().toISOString(),
-                              paymentMethod: 'cash',
-                            });
-                            setBookings(bks => bks.map(bk => bk.id === b.id ? { ...bk, status: 'completed', paidAt: new Date().toISOString(), completedAt: new Date().toISOString(), paymentMethod: 'cash' } : bk));
-                            // Update payment record in user's payments array
-                            const userSnap = await getDocs(collection(db, 'users'));
-                            const userDoc = userSnap.docs.find(u => u.data().email === b.email);
-                            if (userDoc) {
-                              const userRef = doc(db, 'users', userDoc.id);
-                              const userData = userDoc.data();
-                              const payments = (userData.payments || []).map(p =>
-                                p.bookingId === b.id && p.method === 'cash' && p.status === 'Pending'
-                                  ? { ...p, status: 'Success' }
-                                  : p
-                              );
-                              await updateDoc(userRef, { payments });
-                            }
-                            setBookingActionLoading('');
-                            toast.success('Marked as paid!');
-                          }}>
-                            Mark as Paid
-                          </Button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-      {/* History Tab */}
-      {tab === 'history' && (
-        <div className="bg-white rounded-2xl shadow-xl p-4 md:p-8 border border-blue-100">
-          <h2 className="text-2xl font-bold mb-4 text-blue-700">History</h2>
-          <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-4 mb-4 md:mb-6">
-            <Input
-              type="text"
-              placeholder="Search by user name or email"
-              value={historySearch}
-              onChange={e => setHistorySearch(e.target.value)}
-              className="w-full md:w-64"
-            />
-            <TabSortOptions tab="history" sortOrder={historySortOrder} onSortChange={setHistorySortOrder} />
-          </div>
-          <div className="overflow-x-auto rounded-lg">
-            <table className="min-w-[900px] md:min-w-full bg-white rounded-lg shadow text-xs md:text-base">
-              <thead className="bg-blue-50">
-                <tr>
-                  <th className="py-2 px-4">User</th>
-                  <th className="py-2 px-4">Plan/Service</th>
-                  <th className="py-2 px-4">Type</th>
-                  <th className="py-2 px-4">Status</th>
-                  <th className="py-2 px-4">Requested At</th>
-                  <th className="py-2 px-4">Completed/Rejected At</th>
-                  <th className="py-2 px-4">Rejection Reason</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortHistory(filteredBookings, historySortOrder)
-                  .map((b, i) => (
-                    <tr key={b.id} className={i % 2 === 0 ? 'bg-gray-50 hover:bg-gray-100 transition' : 'hover:bg-gray-100 transition'}>
-                      <td className="py-2 px-4 align-middle">{b.username || b.name || b.email}</td>
-                      <td className="py-2 px-4 align-middle">{b.service || b.planName}</td>
-                      <td className="py-2 px-4 align-middle">{b.type || '-'}</td>
-                      <td className="py-2 px-4 align-middle font-semibold capitalize">{b.status}</td>
-                      <td className="py-2 px-4 align-middle font-mono text-xs text-gray-700">{b.createdAt?.seconds ? new Date(b.createdAt.seconds * 1000).toLocaleString() : ''}</td>
-                      <td className="py-2 px-4 align-middle font-mono text-xs text-gray-700">{b.completedAt ? new Date(b.completedAt).toLocaleString() : b.rejectedAt ? new Date(b.rejectedAt).toLocaleString() : ''}</td>
-                      <td className="py-2 px-4 align-middle text-red-700">{b.rejectReason || '-'}</td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-      {/* Analytics Tab */}
-      {tab === 'analytics' && (
-        <div className="bg-white rounded-2xl shadow-xl p-4 md:p-8 border border-blue-100">
-          <h2 className="text-2xl font-bold mb-4 text-blue-700">Analytics</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-            <div>
-              <h3 className="font-semibold mb-2">Bookings Over Time</h3>
-              <ResponsiveContainer width="100%" height={250}>
-                <LineChart data={analyticsData.bookings} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="date" />
-                  <YAxis allowDecimals={false} />
-                  <Tooltip />
-                  <Line type="monotone" dataKey="count" stroke="#8884d8" activeDot={{ r: 8 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-            <div>
-              <h3 className="font-semibold mb-2">Payments Over Time</h3>
-              <ResponsiveContainer width="100%" height={250}>
-                <BarChart data={analyticsData.payments} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="date" />
-                  <YAxis allowDecimals={false} />
-                  <Tooltip />
-                  <Bar dataKey="count" fill="#82ca9d" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-            <div>
-              <h3 className="font-semibold mb-2">Top Services</h3>
-              <ResponsiveContainer width="100%" height={250}>
-                <PieChart>
-                  <Pie data={analyticsData.topServices} dataKey="count" nameKey="service" cx="50%" cy="50%" outerRadius={80} fill="#8884d8" label />
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-            <div>
-              <h3 className="font-semibold mb-2">Most Active Users</h3>
-              <ResponsiveContainer width="100%" height={250}>
-                <BarChart data={analyticsData.topUsers} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="email" />
-                  <YAxis allowDecimals={false} />
-                  <Tooltip />
-                  <Bar dataKey="count" fill="#ffc658" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        </div>
-      )}
-      {/* Feedback Tab */}
-      {tab === 'feedback' && (
-        <div className="bg-white rounded-2xl shadow-xl p-4 md:p-8 border border-purple-100">
-          <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-4 mb-4 md:mb-6">
-            <Input
-              type="text"
-              placeholder="Search messages by name, email, subject, or content"
-              value={msgSearch}
-              onChange={e => setMsgSearch(e.target.value)}
-              className="mb-4 w-full md:w-96"
-            />
-            <div className="flex gap-2 mb-2">
-              <Button onClick={handleBulkDeleteMsgs} disabled={selectedMsgIds.length === 0} variant="destructive">Delete Selected</Button>
-              <Button onClick={() => handleBulkMarkRead(true)} disabled={selectedMsgIds.length === 0}>Mark Read</Button>
-              <Button onClick={() => handleBulkMarkRead(false)} disabled={selectedMsgIds.length === 0}>Mark Unread</Button>
-              <Button onClick={handleBulkExportMsgs} disabled={selectedMsgIds.length === 0}>Export Selected</Button>
-            </div>
-          </div>
-          <div className="flex justify-end mb-4">
-            <Button onClick={exportFeedbackCSV} className="bg-blue-600 text-white">Export CSV</Button>
-          </div>
-          <div className="overflow-x-auto rounded-lg">
-            <table className="min-w-[900px] md:min-w-full text-left text-xs md:text-base">
-              <thead className="bg-purple-50">
-                <tr>
-                  <th className="py-2 px-4"><input type="checkbox" checked={selectedMsgIds.length === paginatedMessages.length && paginatedMessages.length > 0} onChange={handleMsgSelectAll} /></th>
-                  <th className="py-2 px-4"><UserCircle className="inline w-5 h-5 mr-1 text-purple-400" />User</th>
-                  <th className="py-2 px-4">Subject</th>
-                  <th className="py-2 px-4">Message</th>
-                  <th className="py-2 px-4">Date</th>
-                  <th className="py-2 px-4">Status</th>
-                  <th className="py-2 px-4">Admin Note</th>
-                  <th className="py-2 px-4">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortFeedback(filteredMessages, feedbackSortOrder)
-                  .map((msg, i) => (
-                    <tr key={msg.id} className={`transition ${i % 2 === 0 ? 'bg-purple-50/40' : 'bg-white'} hover:bg-purple-100/60 border-b border-purple-100`}>
-                      <td className="py-3 px-4 align-middle"><input type="checkbox" checked={selectedMsgIds.includes(msg.id)} onChange={() => handleMsgSelect(msg.id)} /></td>
-                      <td className="py-3 px-4 align-middle">
-                        <div className="flex items-center gap-3">
-                          <Avatar className="w-8 h-8 text-base bg-purple-200 text-purple-700">
-                            <AvatarFallback>{(msg.name || msg.email || 'U')[0]}</AvatarFallback>
-                          </Avatar>
-                          <div>
-                            <div className="font-bold text-base text-gray-900">{msg.name}</div>
-                            <div className="text-xs text-gray-500">{msg.email}</div>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="py-3 px-4 align-middle text-gray-700">{msg.subject || <span className="text-gray-400">NA</span>}</td>
-                      <td className="py-3 px-4 align-middle text-gray-700">{msg.message || <span className="text-gray-400">NA</span>}</td>
-                      <td className="py-3 px-4 align-middle font-mono text-xs text-gray-700">{msg.createdAt?.seconds ? new Date(msg.createdAt.seconds * 1000).toLocaleString() : ''}</td>
-                      <td className="py-3 px-4 align-middle">
-                        <span className={`inline-block px-3 py-1 rounded-full text-xs font-bold ${msg.read ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-yellow-50 text-yellow-700 border border-yellow-200'}`}>{msg.read ? 'Read' : 'Unread'}</span>
-                      </td>
-                      <td className="py-3 px-4 align-middle">
-                        <button
-                          className="flex items-center gap-1 px-2 py-1 rounded-full bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-semibold shadow-sm transition"
-                          onClick={() => { setModalType('note'); setModalMsgId(msg.id); }}
-                        >
-                          <StickyNote className="w-4 h-4" /> {msg.adminNote ? 'Edit Note' : 'Add Note'}
-                        </button>
-                      </td>
-                      <td className="py-3 px-4 align-middle flex gap-2">
-                        <button
-                          className="flex items-center gap-1 px-2 py-1 rounded-full bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold shadow-sm transition"
-                          onClick={() => { setModalType('reply'); setModalMsgId(msg.id); }}
-                        >
-                          <MessageCircle className="w-4 h-4" /> Reply
-                        </button>
-                        <button
-                          className="flex items-center gap-1 px-2 py-1 rounded-full bg-gray-50 hover:bg-gray-200 text-gray-700 text-xs font-semibold shadow-sm border border-gray-200 transition"
-                          onClick={() => handleMarkRead(msg.id, !msg.read)}
-                        >
-                          <Pencil className="w-4 h-4" /> {msg.read ? 'Mark Unread' : 'Mark Read'}
-                        </button>
-                        <button
-                          className="flex items-center gap-1 px-2 py-1 rounded-full bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold shadow-sm border border-red-200 transition"
-                          onClick={() => handleDeleteMsg(msg.id)}
-                        >
-                          <Trash2 className="w-4 h-4" /> Delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="flex justify-between items-center mt-4">
-            <Button onClick={() => setMsgPage(p => Math.max(1, p-1))} disabled={msgPage === 1}>Prev</Button>
-            <span>Page {msgPage} of {Math.ceil(filteredMessages.length/MSGS_PER_PAGE) || 1}</span>
-            <Button onClick={() => setMsgPage(p => p+1)} disabled={msgPage*MSGS_PER_PAGE >= filteredMessages.length}>Next</Button>
-          </div>
-        </div>
-      )}
-      {/* Plan Requests Tab */}
-      {tab === 'requests' && (
-        <div className="bg-white rounded-2xl shadow-xl p-4 md:p-8 border border-yellow-100">
-          <h2 className="text-2xl font-bold mb-4 text-yellow-700">Requests</h2>
-          <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-4 mb-4 md:mb-6">
-            <input
-              type="text"
-              placeholder="Search by name or email"
-              value={planRequestSearch}
-              onChange={e => setPlanRequestSearch(e.target.value)}
-              className="w-full md:w-64 border rounded px-3 py-2 text-base"
-            />
-            <select
-              className="border rounded px-3 py-2 text-base w-full md:w-48"
-              value={planRequestStatusFilter}
-              onChange={e => setPlanRequestStatusFilter(e.target.value)}
-            >
-              <option value="">All Statuses</option>
-              <option value="pending">Pending</option>
-              <option value="approved">Approved</option>
-              <option value="rejected">Rejected</option>
-            </select>
-          </div>
-          {planReqTabLoading ? (
-            <div className="text-center py-8 text-gray-500">Loading...</div>
-          ) : filteredPlanRequests.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">No plan requests found.</div>
-          ) : (
-            <div className="overflow-x-auto rounded-lg">
-              <table className="min-w-[900px] md:min-w-full bg-white rounded-lg shadow text-xs md:text-base">
-                <thead className="bg-yellow-50">
-                  <tr>
-                    <th className="py-2 px-4">User</th>
-                    <th className="py-2 px-4">Plan</th>
-                    <th className="py-2 px-4">Service Type</th>
-                    <th className="py-2 px-4">KG Limit</th>
-                    <th className="py-2 px-4">Conditioner</th>
-                    <th className="py-2 px-4">Payment</th>
-                    <th className="py-2 px-4">Status</th>
-                    <th className="py-2 px-4">Requested At</th>
-                    <th className="py-2 px-4">Approved At</th>
-                    <th className="py-2 px-4">Rejected At</th>
-                    <th className="py-2 px-4">Rejection Reason</th>
-                    <th className="py-2 px-4">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredPlanRequests.map((u, i) => (
-                    <tr key={u.id} className={i % 2 === 0 ? 'bg-gray-50 hover:bg-gray-100 transition' : 'hover:bg-gray-100 transition'}>
-                      <td className="py-2 px-4 align-middle">{u.name || u.email}</td>
-                      <td className="py-2 px-4 align-middle">{u.planRequest.plan}</td>
-                      <td className="py-2 px-4 align-middle">{u.planRequest.type === 'with' ? 'With Fabric Conditioner' : 'Without Fabric Conditioner'}</td>
-                      <td className="py-2 px-4 align-middle">{u.planRequest.kgLimit}</td>
-                      <td className="py-2 px-4 align-middle">{u.planRequest.conditioner || '-'}</td>
-                      <td className="py-2 px-4 align-middle">{u.planRequest.paymentMethod === 'cash' ? 'Hard Cash' : `Online (Txn ID: ${u.planRequest.txnId})`}</td>
-                      <td className="py-2 px-4 align-middle font-semibold capitalize">{u.planRequest.status}</td>
-                      <td className="py-2 px-4 align-middle font-mono text-xs text-gray-700">{u.planRequest.requestedAt ? new Date(u.planRequest.requestedAt).toLocaleString() : ''}</td>
-                      <td className="py-2 px-4 align-middle font-mono text-xs text-gray-700">{u.planRequest.approvedAt ? new Date(u.planRequest.approvedAt).toLocaleString() : ''}</td>
-                      <td className="py-2 px-4 align-middle font-mono text-xs text-gray-700">{u.planRequest.rejectedAt ? new Date(u.planRequest.rejectedAt).toLocaleString() : ''}</td>
-                      <td className="py-2 px-4 align-middle text-red-700">{u.planRequest.rejectReason || '-'}</td>
-                      <td className="py-2 px-4 align-middle">
-                        {u.planRequest.status === 'pending' && (
-                          <>
-                            <Button size="sm" className="bg-green-600 text-white mr-2" onClick={() => handleApproveRequest(u)}>Approve</Button>
-                            <Button size="sm" className="bg-red-600 text-white" onClick={() => setRejectModal({ open: true, user: u, reason: '' })}>Reject</Button>
-                          </>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {/* Reject Modal */}
-          {rejectModal.open && rejectModal.user && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-              <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full relative">
-                <button className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl" onClick={() => setRejectModal({ open: false, user: null, reason: '' })} aria-label="Close">×</button>
-                <h2 className="text-xl font-bold mb-4 text-red-700">Reject Plan Request</h2>
-                <label className="block mb-2 font-medium text-gray-700">Reason for rejection (optional)</label>
-                <textarea
-                  className="w-full border rounded-lg p-2 mb-4 focus:outline-none focus:ring-2 focus:ring-red-400"
-                  placeholder="Enter reason (optional)"
-                  value={rejectModal.reason}
-                  onChange={e => setRejectModal(r => ({ ...r, reason: e.target.value }))}
-                  rows={3}
-                />
-                <div className="flex gap-2 justify-end">
-                  <Button onClick={() => setRejectModal({ open: false, user: null, reason: '' })} variant="outline">Cancel</Button>
-                  <Button className="bg-red-600 text-white" onClick={() => handleRejectPlanRequest(rejectModal.user, rejectModal.reason)} disabled={!rejectModal.user}>Reject</Button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-      {/* Toasts */}
-      {/* Feedback Modal */}
-      {modalType && (
-        <Dialog open={!!modalType} onOpenChange={open => { if (!open) { setModalType(null); setModalMsgId(null); } }}>
-          <DialogTitle>{modalType === 'reply' ? 'Send Reply' : 'Admin Note'}</DialogTitle>
-          <DialogContent>
-            <Textarea
-              rows={4}
-              placeholder={modalType === 'reply' ? 'Type your reply...' : 'Add a private note...'}
-              value={modalType === 'reply' ? (replyInputs[modalMsgId] || '') : (msgNotes[modalMsgId] !== undefined ? msgNotes[modalMsgId] : (paginatedMessages.find(m => m.id === modalMsgId)?.adminNote || ''))}
-              onChange={e => {
-                if (modalType === 'reply') handleReplyChange(modalMsgId, e.target.value);
-                else handleMsgNoteChange(modalMsgId, e.target.value);
-              }}
-              className="mb-2"
-            />
-          </DialogContent>
-          <DialogFooter>
-            <Button onClick={() => { setModalType(null); setModalMsgId(null); }} variant="outline">Cancel</Button>
-            {modalType === 'reply' ? (
-              <Button onClick={() => { handleSendReply(paginatedMessages.find(m => m.id === modalMsgId)); setModalType(null); setModalMsgId(null); }} disabled={!replyInputs[modalMsgId] || msgLoading}>Send Reply</Button>
-            ) : (
-              <Button onClick={() => { handleSaveMsgNote(paginatedMessages.find(m => m.id === modalMsgId)); setModalType(null); setModalMsgId(null); }} disabled={msgNoteSaving[modalMsgId]}>{msgNoteSaving[modalMsgId] ? 'Saving...' : 'Save Note'}</Button>
-            )}
-          </DialogFooter>
-        </Dialog>
-      )}
-      {showAllUserPayments.open && showAllUserPayments.user && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-2xl w-full relative">
-            <button className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl" onClick={() => setShowAllUserPayments({ open: false, user: null })} aria-label="Close">×</button>
-            <h2 className="text-2xl font-bold mb-4 text-blue-700">All Payments for {showAllUserPayments.user.name || showAllUserPayments.user.email}</h2>
-            <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
-              <table className="w-full rounded-xl shadow-md overflow-hidden">
-                <thead>
-                  <tr className="bg-blue-100">
-                    <th className="py-3 px-6 text-blue-900 text-base font-bold">Date</th>
-                    <th className="py-3 px-6 text-blue-900 text-base font-bold">Amount</th>
-                    <th className="py-3 px-6 text-blue-900 text-base font-bold">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {showAllUserPayments.user.payments.map((p, i) => (
-                    <tr key={i} className={`border-t ${i % 2 === 0 ? 'bg-gray-50' : 'bg-white'} hover:bg-blue-50 transition`}>
-                      <td className="py-3 px-6 text-gray-800 align-middle">{p.date}</td>
-                      <td className="py-3 px-6 text-gray-800 align-middle">₹{p.amount}</td>
-                      <td className="py-3 px-6 align-middle">
-                        <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${p.status === 'Success' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>{p.status}</span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
-      {/* Usage Modal */}
-      {usageModal.open && (
-        <Modal
-          isOpen={usageModal.open}
-          onClose={() => setUsageModal({ open: false, user: null, value: '', bookingId: null })}
-          title="Enter Used KG/Amount"
+
+      {/* Navigation Tabs */}
+      <div className="flex gap-2 mb-8 border-b border-gray-200 overflow-x-auto">
+        {/* Users Tab */}
+        <Button
+          variant="outline"
+          className={tab === 'users' ? 'bg-purple-600 text-white' : 'border border-gray-300 bg-white text-gray-800'}
+          onClick={() => setTab('users')}
         >
-          <div className="space-y-4">
-            <input
-              type="number"
-              value={usageModal.value}
-              onChange={e => setUsageModal(m => ({ ...m, value: e.target.value }))}
-              placeholder={usageModal.user && usageModal.user.planName === 'Elite Plus' ? 'KG used' : 'Amount due'}
-              className="w-full border rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-blue-400"
-            />
-            <div className="flex justify-end gap-2">
-              <Button onClick={() => setUsageModal({ open: false, user: null, value: '', bookingId: null })} variant="outline">Cancel</Button>
-              {usageModal.user && usageModal.user.planName ? (
-                <Button onClick={handleDeductUsage}>Deduct</Button>
-              ) : (
-                <Button onClick={handleSetAmountDue} disabled={!usageModal.value}>Set Amount Due</Button>
-              )}
-            </div>
+          Users ({totalUsers})
+                            </Button>
+      {/* Bookings Tab */}
+                          <Button 
+          variant="outline"
+          className={tab === 'bookings' ? 'bg-purple-600 text-white' : 'border border-gray-300 bg-white text-gray-800'}
+          onClick={() => setTab('bookings')}
+        >
+          Bookings ({bookingsForBookingsTab.length})
+                          </Button>
+        {/* Plan Requests Tab */}
+         <Button
+          variant="outline"
+          className={tab === 'plans' ? 'bg-purple-600 text-white' : 'border border-gray-300 bg-white text-gray-800'}
+          onClick={() => setTab('plans')}
+        >
+          Plan Requests
+                          </Button>
+      {/* History Tab */}
+        <Button
+          variant="outline"
+          className={tab === 'history' ? 'bg-purple-600 text-white' : 'border border-gray-300 bg-white text-gray-800'}
+          onClick={() => setTab('history')}
+        >
+          History ({bookingHistory.length})
+        </Button>
+      {/* Analytics Tab */}
+         <Button
+          variant="outline"
+          className={tab === 'analytics' ? 'bg-purple-600 text-white' : 'border border-gray-300 bg-white text-gray-800'}
+          onClick={() => setTab('analytics')}
+        >
+          Analytics
+        </Button>
+        {/* Feedback & Support Tab */}
+        <Button
+          variant="outline"
+          className={tab === 'feedback' ? 'bg-purple-600 text-white' : 'border border-gray-300 bg-white text-gray-800'}
+          onClick={() => setTab('feedback')}
+        >
+          Feedback & Support ({unreadFeedback} unread)
+        </Button>
           </div>
-        </Modal>
-      )}
-      {/* Bookings Reject Modal */}
-      {showRejectModal.open && showRejectModal.booking && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full relative">
-            <button
-              className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl"
-              onClick={() => { setShowRejectModal({ open: false, booking: null }); setRejectReason(''); }}
-              aria-label="Close"
-            >×</button>
-            <h2 className="text-xl font-bold mb-4 text-red-700">Reject Booking</h2>
-            <label className="block mb-2 font-medium text-gray-700">Reason for rejection (optional)</label>
-            <textarea
-              className="w-full border rounded-lg p-2 mb-4 focus:outline-none focus:ring-2 focus:ring-red-400"
-              placeholder="Enter reason (optional)"
-              value={rejectReason}
-              onChange={e => setRejectReason(e.target.value)}
-              rows={3}
+
+      {/* Tab Content */}
+      <div>
+        <Suspense fallback={<div>Loading...</div>}>
+          {tab === 'users' && (
+            <UsersTab 
+              users={users} 
+              onUsersChange={setUsers}
             />
-            <div className="flex gap-2 justify-end">
-              <Button onClick={() => { setShowRejectModal({ open: false, booking: null }); setRejectReason(''); }} variant="outline">Cancel</Button>
-              <Button className="bg-red-600 text-white" onClick={() => handleRejectBooking(showRejectModal.booking, rejectReason)} disabled={!showRejectModal.booking}>Reject</Button>
-            </div>
-          </div>
+          )}
+          {tab === 'bookings' && (
+            <Suspense fallback={<div>Loading...</div>}>
+              <BookingsTab 
+                bookings={bookings} 
+                onBookingsChange={handleBookingsChange}
+                users={users}
+                generateReceipt={generateReceipt}
+                loadImageAsBase64={loadImageAsBase64}
+              />
+            </Suspense>
+          )}
+          {tab === 'plans' && <PlanRequestsTab />}
+          {tab === 'history' && <HistoryTab bookings={bookingHistory} onBookingsChange={handleBookingsChange} />}
+          {tab === 'analytics' && (
+             <AnalyticsTab
+               totalUsers={totalUsers}
+               activePlans={activePlans}
+               totalPayments={totalPayments}
+               feedbackCount={feedbackCount}
+               unreadFeedback={unreadFeedback}
+               bookings={bookings} // Pass bookings data for charting
+             />
+          )}
+          {tab === 'feedback' && <FeedbackTab messages={messages} onMessagesChange={handleMessagesChange} />}
+        </Suspense>
         </div>
-      )}
-      {notifDropdownOpen && (
-        <div ref={notifDropdownRef} className="absolute ...">
-          ...dropdown content...
-        </div>
-      )}
-      {addPaymentModal.open && addPaymentModal.user && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full relative">
-            <button className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl" onClick={() => setAddPaymentModal({ open: false, user: null })} aria-label="Close">×</button>
-            <h2 className="text-xl font-bold mb-4 text-yellow-700">Add Payment</h2>
-            <label className="block mb-2 font-medium text-gray-700">Amount</label>
-            <input
-              type="number"
-              className="w-full border rounded-lg p-2 mb-4 focus:outline-none focus:ring-2 focus:ring-yellow-400"
-              value={addPaymentAmount}
-              onChange={e => setAddPaymentAmount(e.target.value)}
-              placeholder="Enter amount"
-            />
-            <label className="block mb-2 font-medium text-gray-700">Status</label>
-            <select
-              className="w-full border rounded-lg p-2 mb-4 focus:outline-none focus:ring-2 focus:ring-yellow-400"
-              value={addPaymentStatus}
-              onChange={e => setAddPaymentStatus(e.target.value)}
-            >
-              <option value="Success">Success</option>
-              <option value="Pending">Pending</option>
-              <option value="Failed">Failed</option>
-            </select>
-            <div className="flex gap-2 justify-end">
-              <Button onClick={() => setAddPaymentModal({ open: false, user: null })} variant="outline">Cancel</Button>
-              <Button className="bg-yellow-600 text-white" onClick={handleAddPaymentManually} disabled={!addPaymentAmount}>Add Payment</Button>
-            </div>
-          </div>
-        </div>
-      )}
+
     </div>
   );
 };
 
 export default AdminDashboard; 
+
+// Helper to sort data (assuming these are defined elsewhere or will be moved)
+/*
+const sortUsers = (users, order) => { }; // Placeholder
+const sortBookings = (bookings, order) => { }; // Placeholder
+const sortHistory = (history, order) => { }; // Placeholder
+const sortFeedback = (feedback, order) => { }; // Placeholder
+*/

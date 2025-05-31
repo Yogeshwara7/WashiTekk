@@ -130,6 +130,18 @@ const Dashboard = () => {
     return () => unsub();
   }, [user]);
 
+  // Fetch bookings in real-time
+  useEffect(() => {
+    if (!user) return;
+    const bookingsRef = collection(db, 'bookings');
+    const q = query(bookingsRef, where('email', '==', user.email), orderBy('createdAt', 'desc'));
+    const unsub = onSnapshot(q, snap => {
+      setBookings(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      console.log('[User Dashboard] Real-time bookings update:', snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+    return () => unsub();
+  }, [user]);
+
   const markAllRead = async () => {
     if (!user) return;
     const notifRef = collection(db, 'users', user.uid, 'notifications');
@@ -153,7 +165,7 @@ const Dashboard = () => {
     if (!user) return;
     // Fetch bookings for this user
     const fetchBookings = async () => {
-      const q = query(collection(db, 'bookings'), where('email', '==', user.email));
+      const q = query(collection(db, 'bookings'), where('email', '==', user.email), orderBy('createdAt', 'desc'));
       const snap = await getDocs(q);
       setBookings(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     };
@@ -211,6 +223,19 @@ const Dashboard = () => {
       createdAt: Timestamp.now(),
     });
     toast.success('Payment successful! Your booking is now completed.');
+
+    // Find the newly added payment record for this booking
+    const updatedUserSnap = await getDoc(doc(db, 'users', user.uid));
+    const updatedDashboard = updatedUserSnap.exists() ? updatedUserSnap.data() : null;
+    const latestPayment = updatedDashboard?.payments?.find(p => p.bookingId === booking.id);
+
+    if (latestPayment && updatedDashboard) {
+      loadImageAsBase64('/signn.png', (signatureBase64) => {
+        generateReceipt(latestPayment, user, updatedDashboard, signatureBase64);
+      });
+    } else {
+      console.error('[User Dashboard] Could not find latest payment or user data to generate receipt.');
+    }
   };
 
   const handleUserNotifClick = async (notif: UserNotification) => {
@@ -226,6 +251,7 @@ const Dashboard = () => {
   };
 
   const handleOpenPayNowModal = (booking) => {
+    console.log('[User Dashboard] Opening Pay Now modal for booking ID:', booking?.id);
     setShowPayNowModal({ open: true, booking });
   };
 
@@ -296,21 +322,83 @@ const Dashboard = () => {
     setPayNowLoading(true);
     const booking = showPayNowModal.booking;
     const amount = booking.amountDue || booking.usage || 0;
-    await openRazorpay({
-      amount,
-      description: `Payment for booking ${booking.id}`,
-      receipt: booking.id,
-      onSuccess: async (response) => {
-        // Mark booking as paid only if payment is verified
-        await handlePayNow(booking.id, 'online');
-        setPayNowLoading(false);
-        setShowPayNowModal({ open: false, booking: null });
-      },
-      onFailure: (errMsg) => {
-        toast.error(errMsg || 'Payment failed or cancelled.');
-        setPayNowLoading(false);
-      }
+
+    console.log('[User Dashboard] Attempting online payment for booking ID:', booking.id);
+
+    // Use a promise wrapper to handle closing the modal after Razorpay interaction
+    const razorpayPromise = new Promise<void>((resolve, reject) => {
+      openRazorpay({
+        amount,
+        description: `Payment for booking ${booking.id}`,
+        receipt: booking.id,
+        handler: async function (response) {
+          try {
+            const verifyRes = await fetch('/api/verify-payment', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+                bookingId: booking.id,
+                userId: user.uid,
+              })
+            });
+            console.log('[User Dashboard] Request body sent to /api/verify-payment:', JSON.stringify({
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+              bookingId: booking.id,
+              userId: user.uid,
+            }));
+            console.log('[User Dashboard] Sending bookingId to /api/verify-payment:', booking.id);
+            const verifyData = await verifyRes.json();
+            if (verifyData.verified) {
+              toast.success('Payment successful!');
+              // Assuming booking status is updated on backend after verification
+              // Call generateReceipt here after successful payment and status update
+              // Find the newly added payment record for this booking
+              const updatedUserSnap = await getDoc(doc(db, 'users', user.uid));
+              const updatedDashboard = updatedUserSnap.exists() ? updatedUserSnap.data() : null;
+              const latestPayment = updatedDashboard?.payments?.find(p => p.bookingId === booking.id);
+
+              if (latestPayment && updatedDashboard) {
+                loadImageAsBase64('/signn.png', (signatureBase64) => {
+                  generateReceipt(latestPayment, user, updatedDashboard, signatureBase64);
+                });
+              } else {
+                console.error('[User Dashboard] Could not find latest payment or user data to generate receipt.');
+              }
+              resolve(); // Resolve promise on success handler completion
+            } else {
+              toast.error(verifyData.message || 'Payment verification failed.');
+              reject(new Error(verifyData.message || 'Payment verification failed')); // Reject promise on error
+            }
+            // Close modal and set loading to false after verification attempt
+            setPayNowLoading(false);
+            setShowPayNowModal({ open: false, booking: null });
+          } catch (e) {
+            console.error('Payment verification error on frontend:', e);
+            toast.error('An error occurred during payment verification.');
+            reject(e); // Reject promise on error
+          }
+        },
+        onFailure: (errMsg) => {
+          toast.error(errMsg || 'Payment failed or cancelled.');
+          reject(new Error(errMsg || 'Payment failed or cancelled')); // Reject promise on failure
+          // Close modal and set loading to false on failure
+          setPayNowLoading(false);
+          setShowPayNowModal({ open: false, booking: null });
+        }
+      });
     });
+
+    try {
+      await razorpayPromise; // Wait for the Razorpay interaction to complete
+    } catch (e) {
+      // Handle potential errors from the Razorpay process if needed
+      console.error('Razorpay interaction failed:', e);
+    }
   };
 
   if (loading) return <div className="flex justify-center items-center h-64">Loading...</div>;
@@ -370,18 +458,28 @@ const Dashboard = () => {
               <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-green-50 text-green-700 font-semibold text-xs"><CheckCircle className="w-4 h-4" />{dashboard.planStatus || 'Active'}</span>
             </div>
             {/* KG or Amount Usage Progress */}
-            {dashboard.planName === 'Elite Plus' && dashboard.planKG && (
-              <div className="mb-2">
-                <div className="text-gray-600">KG Usage:</div>
-                <div className="flex items-center gap-2">
-                  <div className="w-48 h-3 bg-gray-200 rounded-full overflow-hidden">
-                    <div className="h-3 bg-blue-500 rounded-full" style={{ width: `${Math.min(100, Math.round(((dashboard.usage || 0) / dashboard.planKG) * 100))}%` }}></div>
+            {(() => {
+              console.log('[Debug Elite Plus Status Bar]', {
+                planName: dashboard?.planName,
+                planKG: dashboard?.planKG,
+                usage: dashboard?.usage,
+                isElitePlus: dashboard?.planName === 'Elite Plus',
+                isPlanKGValid: typeof dashboard?.planKG === 'number' && dashboard?.planKG > 0
+              });
+              return dashboard?.planName === 'Elite Plus' && typeof dashboard?.planKG === 'number' && dashboard.planKG > 0 && (
+                <div className="mb-2">
+                  <div className="text-gray-600">KG Usage:</div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-48 h-3 bg-gray-200 rounded-full overflow-hidden">
+                      <div className="h-3 bg-blue-500 rounded-full" style={{ width: `${Math.min(100, Math.round(((dashboard.usage || 0) / dashboard.planKG) * 100))}%` }}></div>
+                    </div>
+                    <span className="font-semibold text-blue-700">{dashboard.usage || 0} / {dashboard.planKG} KG</span>
                   </div>
-                  <span className="font-semibold text-blue-700">{dashboard.usage || 0} / {dashboard.planKG} KG</span>
                 </div>
-              </div>
-            )}
-            {dashboard.planName === 'Elite' && dashboard.planPrice && (
+              );
+            })()}
+            {/* Elite Amount Usage */}
+            {dashboard?.planName === 'Elite' && typeof dashboard?.planPrice === 'number' && dashboard.planPrice > 0 && (
               <div className="mb-2">
                 <div className="text-gray-600">Amount Usage:</div>
                 <div className="flex items-center gap-2">
@@ -392,22 +490,18 @@ const Dashboard = () => {
                 </div>
               </div>
             )}
-            <div className="mt-4 flex gap-4">
-              <button
-                className="px-6 py-2 bg-blue-600 text-white rounded-lg shadow hover:bg-blue-700 font-semibold transition"
-                onClick={() => setShowRenewModal(true)}
-              >
-                <RefreshCw className="w-4 h-4 inline mr-1" />Renew Plan
-              </button>
-              {canUpgrade && nextPlan && (
-                <button
-                  className="px-6 py-2 bg-green-600 text-white rounded-lg shadow hover:bg-green-700 font-semibold transition"
+            {/* Show Renew/Upgrade buttons only if plan is not active or expired */}
+            {!dashboard?.planStatus || dashboard.planStatus !== 'Active' || (dashboard.planExpired && new Date(dashboard.planExpired) < new Date()) ? (
+              <div className="mt-4 flex gap-4">
+                <Button
+                  className="px-6 py-2 bg-blue-600 text-white rounded-lg shadow hover:bg-blue-700 font-semibold transition"
                   onClick={() => { setUpgradePlan(nextPlan); setShowUpgradeModal(true); }}
                 >
-                  <TrendingUp className="w-4 h-4 inline mr-1" />Upgrade to {nextPlan.name}
-                </button>
-              )}
-            </div>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" className="mr-2 h-4 w-4"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.75L3 8"/><path d="M3 3v5h5"/><path d="M21 12a9 9 0 0 0-9 9 9.75 9.75 0 0 0 6.74-2.75L21 16"/><path d="M16 16h5v5"/></svg>
+                  Renew Plan
+                </Button>
+              </div>
+            ) : null}
           </>
         ) : (
           <div className="text-gray-500">No plan found. Please purchase a plan.</div>
@@ -486,7 +580,11 @@ const Dashboard = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {dashboard.payments.map((p, i) => (
+                  {/* Sort payments by date (most recent first) */}
+                  {dashboard.payments
+                    .slice()
+                    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+                    .map((p, i) => (
                     <tr key={i} className={`border-t ${i % 2 === 0 ? 'bg-gray-50 dark:bg-gray-800' : 'bg-white dark:bg-gray-900'} hover:bg-blue-50 dark:hover:bg-blue-950 transition`}>
                       <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{p.date}</td>
                       <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">₹{p.amount}</td>
@@ -550,8 +648,18 @@ const Dashboard = () => {
                     <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.pickupTime}</td>
                     <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.address}</td>
                     <td className="py-3 px-6 align-middle">
-                      <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${b.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : b.status === 'accepted' ? 'bg-blue-100 text-blue-700' : b.status === 'completed' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>{b.status || 'pending'}</span>
-                      {b.status === 'awaiting_payment' && (
+                      <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${
+                        b.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 
+                        b.status === 'accepted' ? 'bg-blue-100 text-blue-700' : 
+                        b.status === 'completed' && !b.paidAt ? 'bg-orange-100 text-orange-700' : 
+                        b.status === 'completed' && b.paidAt ? 'bg-purple-100 text-purple-700' :
+                        'bg-gray-100 text-gray-700'
+                      }`}>
+                        {b.status === 'completed' && !b.paidAt ? 'Payment Pending' :
+                         b.status === 'completed' && b.paidAt ? 'Paid' :
+                         b.status || 'pending'}
+                      </span>
+                      {b.status === 'completed' && !b.paidAt && (
                         <Button className="ml-2 px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded" onClick={() => handleOpenPayNowModal(b)}>
                           Pay Now
                         </Button>
@@ -596,8 +704,18 @@ const Dashboard = () => {
                       <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.pickupTime}</td>
                       <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.address}</td>
                       <td className="py-3 px-6 align-middle">
-                        <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${b.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : b.status === 'accepted' ? 'bg-blue-100 text-blue-700' : b.status === 'completed' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>{b.status || 'pending'}</span>
-                        {b.status === 'awaiting_payment' && (
+                        <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${
+                          b.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 
+                          b.status === 'accepted' ? 'bg-blue-100 text-blue-700' : 
+                          b.status === 'completed' && !b.paidAt ? 'bg-orange-100 text-orange-700' : 
+                          b.status === 'completed' && b.paidAt ? 'bg-purple-100 text-purple-700' :
+                          'bg-gray-100 text-gray-700'
+                        }`}>
+                          {b.status === 'completed' && !b.paidAt ? 'Payment Pending' :
+                           b.status === 'completed' && b.paidAt ? 'Paid' :
+                           b.status || 'pending'}
+                        </span>
+                        {b.status === 'completed' && !b.paidAt && (
                           <Button className="ml-2 px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded" onClick={() => handleOpenPayNowModal(b)}>
                             Pay Now
                           </Button>

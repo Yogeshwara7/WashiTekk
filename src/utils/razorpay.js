@@ -1,6 +1,6 @@
 // openRazorpay.js - Utility for Razorpay integration
 
-export async function openRazorpay({ amount, description, receipt, onSuccess, onFailure }) {
+export async function openRazorpay({ amount, description, receipt, onSuccess, onFailure, handler }) {
   try {
     // 1. Create order on backend
     const res = await fetch('/api/create-order', {
@@ -21,7 +21,7 @@ export async function openRazorpay({ amount, description, receipt, onSuccess, on
       name: 'Washitek',
       description,
       order_id: order.id,
-      handler: async function (response) {
+      handler: handler || async function (response) {
         // 3. Verify payment on backend
         try {
           const verifyRes = await fetch('/api/verify-payment', {

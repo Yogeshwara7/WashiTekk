@@ -5,8 +5,10 @@ import { motion } from "framer-motion";
 import QRCode from 'react-qr-code';
 import { auth, db } from '../firebase';
 import { onAuthStateChanged } from 'firebase/auth';
-import { doc, setDoc, getDoc, updateDoc, arrayUnion } from 'firebase/firestore';
+import { doc, setDoc, getDoc, updateDoc, arrayUnion, collection, addDoc } from 'firebase/firestore';
 import ModernAuthForm from './ModernAuthForm';
+import { toast } from 'react-hot-toast';
+import { Timestamp } from 'firebase/firestore';
 
 // @ts-ignore
 declare global {
@@ -16,7 +18,15 @@ declare global {
   }
 }
 
-const plans = [
+interface Plan {
+  name: string;
+  price: number;
+  duration: string;
+  features: string[];
+  kgLimit?: number; // Added optional kgLimit
+}
+
+const plans: Plan[] = [
   {
     name: "Elite Plus",
     price: 10000,
@@ -29,7 +39,8 @@ const plans = [
       "Free Pickup & Delivery",
       "Payment options: Hard cash or Online payment",
       "Note: Plan cannot be changed once selected"
-    ]
+    ],
+    kgLimit: 0, // Initialize kgLimit, will be updated based on user selection
   },
   {
     name: "Elite",
@@ -49,13 +60,13 @@ interface MembershipPlanProps {
   onClose?: () => void;
 }
 
-const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null, onClose }) => {
+const MembershipPlan = ({ preselectedPlan = null, onClose }: MembershipPlanProps) => {
   const [selectedPlan, setSelectedPlan] = useState<string | null>(preselectedPlan?.name || null);
   const sectionRef = useRef<HTMLDivElement>(null);
   const [animateKey, setAnimateKey] = useState(0);
   const wasInView = useRef(false);
   const [showModal, setShowModal] = useState(!!preselectedPlan);
-  const [selectedPlanObj, setSelectedPlanObj] = useState(preselectedPlan);
+  const [selectedPlanObj, setSelectedPlanObj] = useState(preselectedPlan ? plans.find(p => p.name === preselectedPlan.name) : null);
   const [verifying, setVerifying] = useState(false);
   const [verified, setVerified] = useState(false);
   const [eliteStep, setEliteStep] = useState(1);
@@ -67,7 +78,7 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
   const [eliteSummary, setEliteSummary] = useState('');
   const [elitePending, setElitePending] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [userPlan, setUserPlan] = useState<{ planStatus?: string, planActivatedAt?: string, planDuration?: string } | null>(null);
+  const [userPlan, setUserPlan] = useState<{ planStatus?: string, planActivatedAt?: string, planDuration?: string, planKG?: number, usage?: number } | null>(null);
   const [loadingUserPlan, setLoadingUserPlan] = useState(true);
   const [planExpired, setPlanExpired] = useState(false);
   const [elite3kStep, setElite3kStep] = useState(1);
@@ -79,9 +90,15 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
 
   useEffect(() => {
     if (preselectedPlan) {
-      setSelectedPlan(preselectedPlan.name);
-      setSelectedPlanObj(preselectedPlan);
-      setShowModal(true);
+      const plan = plans.find(p => p.name === preselectedPlan.name);
+      if (plan) {
+        setSelectedPlan(plan.name);
+        setSelectedPlanObj(plan);
+        setShowModal(true);
+         if (plan.name === 'Elite Plus') {
+           setEliteKg(plan.kgLimit || 0);
+         }
+      }
     }
   }, [preselectedPlan]);
 
@@ -118,7 +135,7 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
       getDoc(userRef).then(userSnap => {
         if (userSnap.exists()) {
           const data = userSnap.data();
-          setUserPlan(data);
+          setUserPlan(data as { planStatus?: string, planActivatedAt?: string, planDuration?: string, planKG?: number, usage?: number });
           if (data.planStatus === 'Active' && data.planActivatedAt && data.planDuration) {
             const expiry = getExpiryDate(data.planActivatedAt, data.planDuration);
             if (expiry && expiry < new Date()) {
@@ -136,7 +153,7 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
     return () => unsubscribe();
   }, []);
 
-  const handlePlanSelection = (plan) => {
+  const handlePlanSelection = (plan: Plan) => {
     const firebaseUser = auth.currentUser;
     if (!firebaseUser) {
       setShowAuthModal(true);
@@ -146,7 +163,8 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
       setEliteStep(1);
       setEliteType('');
       setEliteConditioner('Comfort');
-      setEliteKg(0);
+      // Set default kgLimit based on initial selection
+      setEliteKg(240); // Default to Without Fabric Conditioner
       setElitePaymentMethod('');
       setEliteTxnId('');
       setEliteSummary('');
@@ -209,7 +227,9 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
               planPrice: selectedPlanObj.price,
               planDuration: selectedPlanObj.duration,
               planStatus: 'Active',
-              payments: arrayUnion(paymentRecord)
+              payments: arrayUnion(paymentRecord),
+              // Add planKG and usage for Elite Plus if applicable
+              ...(selectedPlanObj.name === 'Elite Plus' && { planKG: eliteKg, usage: 0 }),
             });
           } else {
             await setDoc(userRef, {
@@ -217,14 +237,23 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
               planPrice: selectedPlanObj.price,
               planDuration: selectedPlanObj.duration,
               planStatus: 'Active',
-              payments: [paymentRecord]
+              payments: [paymentRecord],
+              // Add planKG and usage for Elite Plus if applicable
+              ...(selectedPlanObj.name === 'Elite Plus' && { planKG: eliteKg, usage: 0 }),
             });
           }
+          // Show success message
+          toast.success('Plan activated successfully!');
+          console.log('[Frontend] Attempting Firestore update for user plan and payment.');
+          handleCloseModal();
         } catch (err) {
           console.error('Failed to update user dashboard:', err);
+          toast.error('Failed to activate plan. Please contact support.');
         }
       }
     } catch (e) {
+      console.error('[Frontend] Error calling /api/verify-payment:', e);
+      toast.error('An error occurred during payment verification.');
       setVerified(false);
     }
     setVerifying(false);
@@ -253,9 +282,15 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
       description: `Payment for ${selectedPlanObj.name}`,
       order_id: order.id,
       handler: async function (response) {
-        // 3. Verify payment on backend
+        console.log('[Frontend] Razorpay handler response:', response); // Log the whole response
+        console.log('[Frontend]', 'Sending to /api/verify-payment:');
+        console.log('  Order ID:', response.razorpay_order_id);
+        console.log('  Payment ID:', response.razorpay_payment_id);
+        console.log('  Signature:', response.razorpay_signature);
+
         setVerifying(true);
         setVerified(false);
+
         try {
           const verifyRes = await fetch('/api/verify-payment', {
             method: 'POST',
@@ -277,7 +312,9 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
               date: new Date().toLocaleString(),
               amount: selectedPlanObj.price,
               status: 'Success',
-              plan: selectedPlanObj.name
+              plan: selectedPlanObj.name,
+              paymentMethod: 'online',
+              txnId: response.razorpay_payment_id
             };
             try {
               const userSnap = await getDoc(userRef);
@@ -287,7 +324,9 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
                   planPrice: selectedPlanObj.price,
                   planDuration: selectedPlanObj.duration,
                   planStatus: 'Active',
-                  payments: arrayUnion(paymentRecord)
+                  payments: arrayUnion(paymentRecord),
+                  // Add planKG and usage for Elite Plus if applicable
+                  ...(selectedPlanObj.name === 'Elite Plus' && { planKG: eliteKg, usage: 0 }),
                 });
               } else {
                 await setDoc(userRef, {
@@ -295,14 +334,23 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
                   planPrice: selectedPlanObj.price,
                   planDuration: selectedPlanObj.duration,
                   planStatus: 'Active',
-                  payments: [paymentRecord]
+                  payments: [paymentRecord],
+                  // Add planKG and usage for Elite Plus if applicable
+                  ...(selectedPlanObj.name === 'Elite Plus' && { planKG: eliteKg, usage: 0 }),
                 });
               }
+              // Show success message
+              toast.success('Plan activated successfully!');
+              console.log('[Frontend] Attempting Firestore update for user plan and payment.');
+              handleCloseModal();
             } catch (err) {
               console.error('Failed to update user dashboard:', err);
+              toast.error('Failed to activate plan. Please contact support.');
             }
           }
         } catch (e) {
+          console.error('[Frontend] Error calling /api/verify-payment:', e);
+          toast.error('An error occurred during payment verification.');
           setVerified(false);
         }
         setVerifying(false);
@@ -339,6 +387,12 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
       description: 'Payment for Elite',
       order_id: order.id,
       handler: async function (response) {
+        console.log('[Frontend] Razorpay handler response:', response); // Log the whole response
+        console.log('[Frontend]', 'Sending to /api/verify-payment:');
+        console.log('  Order ID:', response.razorpay_order_id);
+        console.log('  Payment ID:', response.razorpay_payment_id);
+        console.log('  Signature:', response.razorpay_signature);
+
         setElite3kVerifying(true);
         setElite3kVerified(false);
         try {
@@ -353,10 +407,55 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
           });
           const verifyData = await verifyRes.json();
           setElite3kVerified(verifyData.verified);
+    
           if (verifyData.verified) {
             setElite3kTxnId(response.razorpay_payment_id);
+            console.log('[Frontend] Attempting Firestore update after Elite 3k payment verification.');
+            // Update Firestore with plan/payment info for Elite 3k
+            const firebaseUser = auth.currentUser;
+            if (!firebaseUser) return;
+            const userRef = doc(db, 'users', firebaseUser.uid);
+            const paymentRecord = {
+              date: new Date().toLocaleString(),
+              amount: 3000,
+              status: 'Success',
+              plan: 'Elite',
+              paymentMethod: 'online',
+              txnId: response.razorpay_payment_id
+            };
+            try {
+              const userSnap = await getDoc(userRef);
+              if (userSnap.exists()) {
+                await updateDoc(userRef, {
+                  planName: 'Elite',
+                  planPrice: 3000,
+                  planDuration: '3 Months',
+                  planStatus: 'Active',
+                  payments: arrayUnion(paymentRecord),
+                  // Elite 3k does not have planKG or usage fields - they track amountUsed
+                });
+              } else {
+                await setDoc(userRef, {
+                  planName: 'Elite',
+                  planPrice: 3000,
+                  planDuration: '3 Months',
+                  planStatus: 'Active',
+                  payments: [paymentRecord],
+                  // Elite 3k does not have planKG or usage fields - they track amountUsed
+                });
+              }
+              // Show success message
+              toast.success('Elite Plan activated successfully!');
+              // Close modal after successful payment and Firestore update
+              handleCloseModal();
+            } catch (err) {
+              console.error('Failed to update user dashboard after Elite 3k payment:', err);
+              toast.error('Failed to activate Elite plan. Please contact support.');
+            }
           }
         } catch (e) {
+          console.error('[Frontend] Error calling /api/verify-payment:', e);
+          toast.error('An error occurred during payment verification.');
           setElite3kVerified(false);
         }
         setElite3kVerifying(false);
@@ -384,7 +483,7 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
   }, []);
 
   if (loadingUserPlan) {
-    return <div>Loading...</div>;
+    return <div className="text-center py-4">Loading...</div>;
   }
 
   return (
@@ -537,11 +636,7 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
                   </div>
                   {eliteType === 'with' && (
                     <div className="mb-4">
-                      <div className="font-semibold mb-2">Choose Conditioner:</div>
-                      <select className="w-full border rounded px-3 py-2" value={eliteConditioner} onChange={e => setEliteConditioner(e.target.value)}>
-                        <option value="Comfort">Comfort</option>
-                        <option value="Dettol">Dettol</option>
-                      </select>
+                      {/* Remove Choose Conditioner dropdown */}
                     </div>
                   )}
                   <Button className="w-full" disabled={!eliteType} onClick={() => setEliteStep(2)}>Next</Button>
@@ -589,27 +684,69 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
                   </ul>
                   <Button className="w-full mb-2" disabled={elitePending} onClick={async () => {
                     setElitePending(true);
-                    // Store request as pending for admin approval
                     const firebaseUser = auth.currentUser;
                     if (!firebaseUser) return;
                     const userRef = doc(db, 'users', firebaseUser.uid);
-                    await setDoc(userRef, {
-                      planRequest: {
-                        plan: 'Elite Plus',
-                        price: 10000,
-                        duration: '1 Year',
-                        type: eliteType,
-                        conditioner: eliteType === 'with' ? eliteConditioner : '',
-                        kgLimit: eliteKg,
-                        paymentMethod: elitePaymentMethod,
-                        txnId: elitePaymentMethod === 'online' ? eliteTxnId : '',
-                        status: 'pending',
-                        requestedAt: new Date().toISOString(),
+                    const userSnap = await getDoc(userRef);
+                    const userData = userSnap.data();
+                    
+                    const planRequestData = {
+                      plan: 'Elite Plus',
+                      price: 10000,
+                      duration: '1 Year',
+                      type: eliteType,
+                      conditioner: eliteType === 'with' ? eliteConditioner : '',
+                      kgLimit: eliteKg,
+                      paymentMethod: elitePaymentMethod,
+                      txnId: elitePaymentMethod === 'online' ? eliteTxnId : '',
+                      status: elitePaymentMethod === 'online' ? 'active' : 'pending',
+                      requestedAt: Timestamp.now(),
+                      userId: firebaseUser.uid,
+                      name: userData?.name || '',
+                      email: userData?.email || '',
+                    };
+                    
+                    try {
+                      // Add the plan request to a dedicated collection - ONLY FOR CASH
+                      if (elitePaymentMethod === 'cash') {
+                        const planRequestsRef = collection(db, 'plan_requests');
+                        await addDoc(planRequestsRef, planRequestData);
+                        toast.success('Plan request submitted! Please pay the admin to activate your plan.');
+                        setElitePending(false);
+                        setEliteStep(4);
+                      } else if (elitePaymentMethod === 'online') {
+                        // For online payment, activate plan immediately
+                        const userRef = doc(db, 'users', firebaseUser.uid);
+                        await updateDoc(userRef, {
+                          planName: planRequestData.plan,
+                          planPrice: planRequestData.price,
+                          planDuration: planRequestData.duration,
+                          planType: planRequestData.type || '',
+                          conditioner: planRequestData.conditioner,
+                          planStatus: 'Active',
+                          payments: arrayUnion({
+                            date: new Date().toLocaleString(),
+                            amount: planRequestData.price,
+                            status: 'Success',
+                            plan: planRequestData.plan,
+                            paymentMethod: 'online',
+                            txnId: eliteTxnId
+                          }),
+                          // Add planKG and usage for Elite Plus
+                          planKG: planRequestData.kgLimit, // Elite Plus has KG limit
+                          usage: 0, // Initialize usage
+                        });
+                        toast.success('Elite Plus Plan activated successfully!');
+                        setElitePending(false);
+                         setEliteStep(3); // Stay on step 3 for online success summary
                       }
-                    }, { merge: true });
-                    setElitePending(false);
-                    setEliteStep(4);
-                  }}>Submit for Approval</Button>
+                      
+                    } catch (error) {
+                      console.error('Failed to process plan request:', error);
+                      toast.error('Failed to process plan request. Please try again.');
+                      setElitePending(false);
+                    }
+                  }}>Submit</Button>
                   <Button className="w-full" variant="outline" onClick={() => setEliteStep(2)}>Back</Button>
                 </div>
               )}
@@ -661,27 +798,73 @@ const MembershipPlan: React.FC<MembershipPlanProps> = ({ preselectedPlan = null,
                     const firebaseUser = auth.currentUser;
                     if (!firebaseUser) return;
                     const userRef = doc(db, 'users', firebaseUser.uid);
-                    await setDoc(userRef, {
-                      planRequest: {
-                        plan: 'Elite',
-                        price: 3000,
-                        duration: '3 Months',
-                        paymentMethod: elite3kPaymentMethod,
-                        txnId: elite3kPaymentMethod === 'online' ? elite3kTxnId : '',
-                        status: 'pending',
-                        requestedAt: new Date().toISOString(),
-                      }
-                    }, { merge: true });
-                    setElite3kPending(false);
-                    setElite3kStep(3);
-                  }}>Submit for Approval</Button>
+                    const userSnap = await getDoc(userRef);
+                    const userData = userSnap.data();
+                    
+                    const planRequestData = {
+                      plan: 'Elite',
+                      price: 3000,
+                      duration: '3 Months',
+                      paymentMethod: elite3kPaymentMethod,
+                      txnId: elite3kPaymentMethod === 'online' ? elite3kTxnId : '',
+                      status: elite3kPaymentMethod === 'online' ? 'active' : 'pending',
+                      requestedAt: Timestamp.now(),
+                      userId: firebaseUser.uid,
+                      name: userData?.name || '',
+                      email: userData?.email || '',
+                    };
+                    
+                    try {
+                      // Add the plan request to a dedicated collection - ONLY FOR CASH
+                       if (elite3kPaymentMethod === 'cash') {
+                        const planRequestsRef = collection(db, 'plan_requests');
+                        await addDoc(planRequestsRef, planRequestData);
+                         toast.success('Plan request submitted! Please pay the admin to activate your plan.');
+                         setElite3kPending(false);
+                         setElite3kStep(3);
+                       } else if (elite3kPaymentMethod === 'online') {
+                        // For online payment, activate plan immediately
+                        const userRef = doc(db, 'users', firebaseUser.uid);
+                        await updateDoc(userRef, {
+                          planName: planRequestData.plan,
+                          planPrice: planRequestData.price,
+                          planDuration: planRequestData.duration,
+                          planStatus: 'Active',
+                          payments: arrayUnion({
+                            date: new Date().toLocaleString(),
+                            amount: planRequestData.price,
+                            status: 'Success',
+                            plan: planRequestData.plan,
+                            paymentMethod: 'online',
+                            txnId: elite3kTxnId
+                          }),
+                          // Elite 3k does not have planKG or usage fields - they track amountUsed
+                        });
+                        toast.success('Elite Plan activated successfully!');
+                        setElite3kPending(false);
+                         setElite3kStep(2);
+                       }
+                      
+                    } catch (error) {
+                      console.error('Failed to process plan request:', error);
+                      toast.error('Failed to process plan request. Please try again.');
+                      setElite3kPending(false);
+                    }
+                  }}>Submit</Button>
                   <Button className="w-full" variant="outline" onClick={() => setElite3kStep(1)}>Back</Button>
+                </div>
+              )}
+              {elite3kStep === 2 && (
+                <div className="text-center py-8">
+                   <div className="text-green-600 text-lg font-semibold mb-2">Plan Activated!</div>
+                  <div className="text-gray-600">Your Elite plan is now active.</div>
+                  <Button className="mt-6 w-full" onClick={handleCloseModal}>Close</Button>
                 </div>
               )}
               {elite3kStep === 3 && (
                 <div className="text-center py-8">
                   <div className="text-green-600 text-lg font-semibold mb-2">Request Submitted!</div>
-                  <div className="text-gray-600">Your plan request is pending admin approval. You will be notified once approved.</div>
+                  <div className="text-gray-600">Your plan request is pending admin approval. Please pay the admin to activate your plan.</div>
                   <Button className="mt-6 w-full" onClick={handleCloseModal}>Close</Button>
                 </div>
               )}
