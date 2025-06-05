@@ -31,7 +31,7 @@ const AnalyticsTab = lazy(() => import('../components/dashboard/AnalyticsTab'));
 const CreditsUsedTab = lazy(() => import('../components/dashboard/CreditsUsedTab'));
 
 // List of admin emails (replace with your admin email(s))
-const ADMIN_EMAILS = ['yogeshwara567@gmail.com'];
+const ADMIN_EMAILS = (process.env.REACT_APP_ADMIN_EMAILS || '').split(',');
 
 // Add interface for plan request user
 interface PlanRequestUser {
