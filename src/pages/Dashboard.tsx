@@ -11,9 +11,41 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Mail, Phone } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { colors } from '@/styles/colors';
-import { generateReceipt, loadImageAsBase64 } from '../utils/generateReceipt';
+import { generateReceipt } from '../utils/generateReceipt';
 import { toast } from 'react-hot-toast';
 import { openRazorpay } from '../utils/razorpay';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import BookingModal from '../components/BookingModal';
+import { nanoid } from 'nanoid';
+
+// --- Re-implement loadImageAsBase64 function here ---
+// This function fetches a static image and converts it to a base64 Data URL.
+const loadImageAsBase64 = (imagePath: string, callback: (base64: string) => void) => {
+  fetch(imagePath)
+    .then(response => response.blob())
+    .then(blob => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        // The result is the data URL (e.g., "data:image/png;base64,...")
+        if (typeof reader.result === 'string') {
+          callback(reader.result);
+        } else {
+          console.error('FileReader did not return a string result.');
+          callback(''); // Return empty string on error
+        }
+      };
+      reader.onerror = (error) => {
+        console.error('FileReader error:', error);
+        callback(''); // Return empty string on error
+      };
+      reader.readAsDataURL(blob);
+    })
+    .catch(error => {
+      console.error('Error fetching image for base64 conversion:', error);
+      callback(''); // Return empty string on error
+    });
+};
+// --- End loadImageAsBase64 implementation ---
 
 const availablePlans = [
   { name: 'Elite', price: 3000, duration: '3 Months' },
@@ -62,6 +94,7 @@ const Dashboard = () => {
   const [showAllPayments, setShowAllPayments] = useState(false);
   const [showPayNowModal, setShowPayNowModal] = useState({ open: false, booking: null });
   const [payNowLoading, setPayNowLoading] = useState(false);
+  const [generatedReceipts, setGeneratedReceipts] = useState<string[]>([]);
   const faqs = [
     {
       q: 'How do I renew or upgrade my plan?',
@@ -90,32 +123,57 @@ const Dashboard = () => {
   ];
   const navigate = useNavigate();
 
-  // Effect 1: Auth
+  // Effect 1: Auth and Firestore User Data (Combined for creation/fetching)
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => { // Made async to use await
       if (!firebaseUser) {
+        setUser(null);
+        setDashboard(null);
+        setLoading(false);
         navigate('/login');
         return;
       }
-      setUser(firebaseUser);
-    });
-    return () => unsubscribe();
-  }, [navigate]);
 
-  // Effect 2: Firestore User Data
-  useEffect(() => {
-    if (!user) return;
-    const docRef = doc(db, 'users', user.uid);
-    const unsub = onSnapshot(docRef, (docSnap) => {
-      if (docSnap.exists()) {
-        setDashboard(docSnap.data());
-      } else {
-        setDashboard(null);
+      setUser(firebaseUser);
+
+      const userDocRef = doc(db, 'users', firebaseUser.uid);
+
+      try {
+        const userDoc = await getDoc(userDocRef);
+
+        if (!userDoc.exists()) {
+          // User document does not exist, create it
+          console.log(`[Dashboard] User document for ${firebaseUser.uid} not found, creating...`);
+          const initialUserData = {
+            email: firebaseUser.email,
+            name: firebaseUser.displayName || 'New User',
+            createdAt: Timestamp.now(),
+            payments: [], // Initialize payments array
+            creditUsed: 0, // Initialize creditUsed field
+            // Add any other default fields you need for a new user
+          };
+          await setDoc(userDocRef, initialUserData);
+          console.log(`[Dashboard] User document for ${firebaseUser.uid} created.`);
+          // Set dashboard state with the initial data
+          setDashboard(initialUserData);
+        } else {
+          // User document exists, set dashboard state
+          const dashboardData = userDoc.data();
+          setDashboard(dashboardData);
+          console.log('[Dashboard Debug - Fetched Dashboard Data]', dashboardData);
+        }
+      } catch (e) {
+        console.error('Error fetching or creating user document:', e);
+        setError('Failed to load user data.');
+        setDashboard(null); // Ensure dashboard is null on error
+      } finally {
+        console.log('[Dashboard] Auth/User data effect finally block reached. Setting loading to false.');
+        setLoading(false);
       }
-      setLoading(false);
     });
-    return () => unsub();
-  }, [user]);
+
+    return () => unsubscribe();
+  }, [navigate]); // Add navigate as dependency if hook uses it
 
   // Fetch notifications in real-time
   useEffect(() => {
@@ -137,7 +195,10 @@ const Dashboard = () => {
     const q = query(bookingsRef, where('email', '==', user.email), orderBy('createdAt', 'desc'));
     const unsub = onSnapshot(q, snap => {
       setBookings(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-      console.log('[User Dashboard] Real-time bookings update:', snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      console.log('[User Dashboard] Real-time bookings update. Snapshot data:', snap.docs.map(doc => {
+        const data = doc.data();
+        return { id: doc.id, status: data.status, paymentConfirmed: data.paymentConfirmed, amountDue: data.amountDue, method: data.paymentMethod, data: data };
+      }));
     });
     return () => unsub();
   }, [user]);
@@ -160,17 +221,6 @@ const Dashboard = () => {
     else document.documentElement.classList.remove('dark');
     localStorage.setItem('darkMode', darkMode ? 'true' : 'false');
   }, [darkMode]);
-
-  useEffect(() => {
-    if (!user) return;
-    // Fetch bookings for this user
-    const fetchBookings = async () => {
-      const q = query(collection(db, 'bookings'), where('email', '==', user.email), orderBy('createdAt', 'desc'));
-      const snap = await getDocs(q);
-      setBookings(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    };
-    fetchBookings();
-  }, [user]);
 
   useEffect(() => {
     if (user && dashboard) {
@@ -210,8 +260,9 @@ const Dashboard = () => {
       paidAt: new Date().toISOString(),
       completedAt: new Date().toISOString(),
       paymentMethod: method,
+      paymentConfirmed: true,
     });
-    setBookings(bks => bks.map(b => b.id === bookingId ? { ...b, status: 'completed', paidAt: new Date().toISOString(), completedAt: new Date().toISOString(), paymentMethod: method } : b));
+    setBookings(bks => bks.map(b => b.id === bookingId ? { ...b, status: 'completed', paidAt: new Date().toISOString(), completedAt: new Date().toISOString(), paymentMethod: method, paymentConfirmed: true } : b));
 
     // Admin notification for payment received
     await addDoc(collection(db, 'admin_notifications'), {
@@ -255,63 +306,60 @@ const Dashboard = () => {
     setShowPayNowModal({ open: true, booking });
   };
 
-  const handlePayWithCredits = async () => {
-    if (!showPayNowModal.booking) return;
-    setPayNowLoading(true);
-    // Deduct credits from user
-    const userRef = doc(db, 'users', user.uid);
-    const userSnap = await getDoc(userRef);
-    const prevCredits = userSnap.exists() ? (userSnap.data().credits || 0) : 0;
-    const amountDue = showPayNowModal.booking.amountDue || showPayNowModal.booking.usage || 0;
-    if (prevCredits < amountDue) {
-      toast.error('Not enough credits.');
-      setPayNowLoading(false);
-      return;
-    }
-    await updateDoc(userRef, { credits: prevCredits - amountDue });
-    await handlePayNow(showPayNowModal.booking.id, 'credits');
-    setPayNowLoading(false);
-    setShowPayNowModal({ open: false, booking: null });
-  };
-
   const handlePayWithCash = async () => {
-    if (!showPayNowModal.booking) return;
+    if (!showPayNowModal.booking || !user) return;
     setPayNowLoading(true);
+    const booking = showPayNowModal.booking;
+    const bookingId = booking.id;
+    const userId = user.uid;
+    const amount = booking.amountDue || booking.usage || 0;
+
+    console.log('[User Dashboard] Attempting to mark booking as cash pending:', bookingId);
+
     try {
-      const bookingId = showPayNowModal.booking.id;
+      // Update booking status to indicate cash payment pending admin confirmation
       const bookingRef = doc(db, 'bookings', bookingId);
-      const userRef = doc(db, 'users', user.uid);
-      
-      // Add payment record with Pending status
+      await updateDoc(bookingRef, {
+        status: 'cash_pending', // Use a status that indicates cash payment is pending admin confirmation
+        paymentMethod: 'cash',
+        // Do NOT set paymentConfirmed here, admin will do that
+      });
+
+      // --- NEW: Add a pending payment record to the user's document ---
+      const userRef = doc(db, 'users', userId);
       const userSnap = await getDoc(userRef);
       const prevPayments = userSnap.exists() ? (userSnap.data().payments || []) : [];
       const paymentRecord = {
         date: new Date().toLocaleString(),
-        amount: showPayNowModal.booking.amountDue || showPayNowModal.booking.usage || 0,
-        status: 'Pending',
+        amount: amount,
+        status: 'Pending (Cash)', // Indicate pending cash payment
         method: 'cash',
-        bookingId,
+        bookingId: bookingId,
+        // paymentConfirmed remains false until admin confirms
       };
       await updateDoc(userRef, { payments: [...prevPayments, paymentRecord] });
-      
-      // Mark booking as cash_pending
-      await updateDoc(bookingRef, {
-        status: 'cash_pending',
-        paymentMethod: 'cash',
+      // --- END NEW ---
+
+
+      // Update local booking state
+      setBookings(bks => bks.map(b => b.id === bookingId ? { ...b, status: 'cash_pending', paymentMethod: 'cash' } : b));
+
+      // Admin notification for cash payment pending
+      await addDoc(collection(db, 'admin_notifications'), {
+        title: 'Cash Payment Pending',
+        body: `Cash payment pending for booking ${booking.customBookingId || bookingId} by user ${user.displayName || user.email}. Amount: ₹${amount}.`,
+        type: 'payment',
+        bookingId: bookingId,
+        read: false,
+        createdAt: Timestamp.now(),
       });
-      
-      // Update local state
-      setBookings(bks => bks.map(b => b.id === bookingId ? { 
-        ...b, 
-        status: 'cash_pending',
-        paymentMethod: 'cash'
-      } : b));
-      
-      toast.success('Cash payment initiated! Please pay the admin.');
+
+      toast.success('Cash payment initiated. Awaiting admin confirmation.');
       setShowPayNowModal({ open: false, booking: null });
+
     } catch (error) {
       console.error('Error processing cash payment:', error);
-      toast.error('Failed to process cash payment. Please try again.');
+      toast.error('Failed to initiate cash payment. Please try again.');
     } finally {
       setPayNowLoading(false);
     }
@@ -342,6 +390,7 @@ const Dashboard = () => {
                 razorpay_signature: response.razorpay_signature,
                 bookingId: booking.id,
                 userId: user.uid,
+                amount: amount
               })
             });
             console.log('[User Dashboard] Request body sent to /api/verify-payment:', JSON.stringify({
@@ -350,25 +399,14 @@ const Dashboard = () => {
               razorpay_signature: response.razorpay_signature,
               bookingId: booking.id,
               userId: user.uid,
+              amount: amount
             }));
             console.log('[User Dashboard] Sending bookingId to /api/verify-payment:', booking.id);
             const verifyData = await verifyRes.json();
             if (verifyData.verified) {
               toast.success('Payment successful!');
-              // Assuming booking status is updated on backend after verification
-              // Call generateReceipt here after successful payment and status update
-              // Find the newly added payment record for this booking
-              const updatedUserSnap = await getDoc(doc(db, 'users', user.uid));
-              const updatedDashboard = updatedUserSnap.exists() ? updatedUserSnap.data() : null;
-              const latestPayment = updatedDashboard?.payments?.find(p => p.bookingId === booking.id);
-
-              if (latestPayment && updatedDashboard) {
-                loadImageAsBase64('/signn.png', (signatureBase64) => {
-                  generateReceipt(latestPayment, user, updatedDashboard, signatureBase64);
-                });
-              } else {
-                console.error('[User Dashboard] Could not find latest payment or user data to generate receipt.');
-              }
+              // Backend has already updated the booking status and added the payment record.
+              // No need to call handlePayNow here.
               resolve(); // Resolve promise on success handler completion
             } else {
               toast.error(verifyData.message || 'Payment verification failed.');
@@ -401,8 +439,215 @@ const Dashboard = () => {
     }
   };
 
+  const handlePayWithCredit = async (booking) => {
+    // Use amountDue or usage for the amount to deduct
+    const amountToDeduct = booking?.amountDue || booking?.usage || 0;
+
+    // Update the initial check to use the calculated amount
+    if (!user || !booking || amountToDeduct <= 0) {
+       console.log("[handlePayWithCredit] Exiting early:", { user: !!user, booking: !!booking, amountToDeduct });
+       return;
+    }
+    setPayNowLoading(true);
+
+    const bookingId = booking.id;
+    const userId = user.uid;
+
+    try {
+      // Call the backend endpoint to deduct credit
+      const response = await fetch('/api/deduct-credit', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          userId: userId,
+          bookingId: bookingId,
+          amount: amountToDeduct,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.message || 'Failed to deduct credit.');
+      }
+
+      console.log('[User Dashboard] Backend credit deduction successful.', result);
+
+      // Update local state for the booking to reflect paid by credit
+      setBookings(bks => bks.map(b => b.id === bookingId ? {
+        ...b,
+        status: 'paid', // Or maybe 'completed', depending on desired final status
+        paymentConfirmed: true, // Payment is confirmed via credit
+        paidAt: new Date().toISOString(), // Set paid timestamp
+        paymentMethod: 'credit', // Payment method was credit
+        amountDue: 0 // Amount due is now 0
+      } : b));
+
+      // Also update the user's creditUsed state locally for immediate feedback
+      // Assuming the backend response includes the new creditUsed amount or we calculate it
+      // A better approach would be to rely on the real-time dashboard snapshot listener
+      // which should update the 'dashboard' state automatically after backend update.
+      // For now, we can wait for the snapshot or add a slight delay/manual fetch if needed.
+      // Or, we can optimistically update the local state:
+       if (dashboard) {
+           setDashboard({
+               ...dashboard,
+               creditUsed: (dashboard.creditUsed || 0) + amountToDeduct
+           });
+       }
+
+
+      toast.success('Payment successful using credit!');
+
+      setShowPayNowModal({ open: false, booking: null });
+
+    } catch (error) {
+      console.error('Error processing credit payment:', error);
+      toast.error(`Failed to process credit payment: ${error.message}`);
+    } finally {
+      setPayNowLoading(false);
+    }
+  };
+
+  const handleDownloadReceipt = (booking) => {
+    // Use user and dashboard from state
+    const paymentRecord = {
+      date: booking.paidAt ? new Date(booking.paidAt).toLocaleString() : new Date().toLocaleString(),
+      amount: booking.amountDue || 0,
+      status: 'Success',
+      method: booking.planName ? 'Plan' : (booking.paymentMethod || 'N/A'),
+      bookingId: booking.id,
+    };
+    loadImageAsBase64('/signn.png', (signatureBase64) => {
+      generateReceipt(paymentRecord, user, dashboard, signatureBase64);
+    });
+  };
+
+  // State for Refill Credit modal
+  const [showRefillCreditModal, setShowRefillCreditModal] = useState(false);
+  const [refillLoading, setRefillLoading] = useState(false); // Add loading state for refill process
+
+  // Placeholder handler for online refill
+  const handleRefillOnline = async () => {
+    if (!dashboard || !user) return;
+    setRefillLoading(true);
+    const amountToRefill = dashboard.creditUsed || 0;
+
+    console.log(`[User Dashboard] Initiating online refill for amount: ₹${amountToRefill}`);
+
+    // Use a promise wrapper to handle closing the modal after Razorpay interaction
+    const razorpayPromise = new Promise<void>((resolve, reject) => {
+      openRazorpay({
+        amount: amountToRefill,
+        description: 'Refill Credit',
+        receipt: `refill_${nanoid(10)}`,
+        handler: async function (response) {
+          try {
+            // Call backend endpoint to verify payment and update credit
+            const verifyRes = await fetch('http://localhost:3001/api/refill-credit', { // Reusing /api/refill-credit for verification and update
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                userId: user.uid,
+                amount: amountToRefill, // Send the amount that was paid to refill
+                // Include Razorpay payment details for verification if needed on backend
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+              })
+            });
+            const verifyData = await verifyRes.json();
+            if (verifyData.success) {
+              toast.success('Credit refilled successfully!');
+              resolve(); // Resolve promise on success
+            } else {
+              toast.error(verifyData.message || 'Credit refill failed after payment.');
+              reject(new Error(verifyData.message || 'Credit refill failed after payment.')); // Reject promise on error
+            }
+            // Close modal and set loading to false after verification attempt
+            setRefillLoading(false);
+            setShowRefillCreditModal(false); // Close modal
+          } catch (e) {
+            console.error('Refill payment verification error on frontend:', e);
+            toast.error('An error occurred during credit refill verification.');
+            reject(e); // Reject promise on error
+          }
+        },
+        onFailure: (errMsg) => {
+          toast.error(errMsg || 'Refill payment failed or cancelled.');
+          reject(new Error(errMsg || 'Refill payment failed or cancelled')); // Reject promise on failure
+          // Close modal and set loading to false on failure
+          setRefillLoading(false);
+          setShowRefillCreditModal(false); // Close modal
+        }
+      });
+    });
+
+    try {
+      await razorpayPromise; // Wait for the Razorpay interaction to complete
+    } catch (e) {
+      // Handle potential errors from the Razorpay process if needed
+      console.error('Razorpay refill interaction failed:', e);
+    }
+  };
+
+  // Placeholder handler for cash refill (simulated)
+  const handleRefillCash = async () => {
+      if (!dashboard || !user) return;
+      setRefillLoading(true);
+      const amountToRefill = dashboard.creditUsed || 0;
+
+      console.log(`[User Dashboard] Initiating cash refill for amount: ₹${amountToRefill}. Simulating admin confirmation.`);
+
+      try {
+          // TODO: In a real application, cash refill might require admin confirmation.
+          // For this simulation, we directly call the backend to refill credit.
+          const response = await fetch('/api/refill-credit', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              userId: user.uid,
+              amount: amountToRefill, // Send the amount that was refilled
+            }),
+          });
+
+          const result = await response.json();
+
+          if (!response.ok) {
+            throw new Error(result.message || 'Failed to refill credit on backend.');
+          }
+
+          console.log('[User Dashboard] Backend credit refill (cash simulated) successful.', result);
+          toast.success('Credit refilled successfully!');
+
+          // The real-time dashboard listener should update the creditUsed state automatically
+
+      } catch (error) {
+          console.error('Error processing cash refill:', error.message);
+          toast.error(`Failed to refill credit: ${error.message}`);
+      } finally {
+          setRefillLoading(false);
+          setShowRefillCreditModal(false); // Close modal regardless of success/failure
+      }
+  };
+
   if (loading) return <div className="flex justify-center items-center h-64">Loading...</div>;
   if (error) return <div className="text-red-600 text-center mt-8">{error}</div>;
+
+  // Add logs here to check values when the modal is open
+  if (showPayNowModal.open && showPayNowModal.booking && dashboard) {
+      console.log('[Dashboard Debug - Pay with Credit Button Disabled Check]');
+      console.log('  payNowLoading:', payNowLoading);
+      console.log('  dashboard.creditUsed:', dashboard?.creditUsed);
+      console.log('  booking amountDue:', showPayNowModal.booking.amountDue);
+      console.log('  booking usage:', showPayNowModal.booking.usage);
+      console.log('  Condition (dashboard.creditUsed || 0) + (amountDue || usage || 0) > 500:', (dashboard?.creditUsed || 0) + (showPayNowModal.booking?.amountDue || showPayNowModal.booking?.usage || 0) > 500);
+      console.log('  Is button disabled?:', payNowLoading || (dashboard?.creditUsed || 0) + (showPayNowModal.booking?.amountDue || showPayNowModal.booking?.usage || 0) > 500);
+  }
 
   return (
     <div className={`max-w-3xl mx-auto py-12 px-2 md:px-4 space-y-8 pt-24 transition-colors duration-300 ${darkMode ? 'dark bg-brand-bg' : 'bg-brand-bg'}`}>
@@ -427,6 +672,26 @@ const Dashboard = () => {
           <div>
             <div className="text-xl font-bold text-gray-800 mb-1">Hello, {user?.displayName || user?.email}</div>
             <div className="text-gray-500 text-sm">Manage your membership, payments, and profile here.</div>
+             {/* Display Credit Information */}
+            {dashboard && typeof dashboard.creditUsed === 'number' && (
+              <div className="mt-2 text-sm text-gray-600 flex items-center gap-2">
+                <CreditCard className="w-5 h-5 text-green-600" />
+                <span>
+                  {/* Updated display to show Credit Balance */}
+                  Credit Balance: ₹{500 - (dashboard.creditUsed || 0)}
+                </span>
+                {/* Add Refill Credit button if creditUsed is greater than 0 */}
+                {(dashboard.creditUsed || 0) > 0 && (
+                   <Button
+                     size="sm"
+                     onClick={() => { setShowRefillCreditModal(true); }}
+                     className="ml-2 px-3 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded"
+                   >
+                     Refill Credit
+                   </Button>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -437,7 +702,7 @@ const Dashboard = () => {
           <TrendingUp className="w-6 h-6 text-green-500" />
           <h2 className="text-2xl font-bold text-blue-700">Current Plan</h2>
         </div>
-        {dashboard ? (
+        {dashboard?.planStatus === 'Active' ? (
           <>
             {/* Pending or Rejected Plan Request Info */}
             {dashboard.planRequest?.status === 'pending' && (
@@ -467,15 +732,15 @@ const Dashboard = () => {
                 isPlanKGValid: typeof dashboard?.planKG === 'number' && dashboard?.planKG > 0
               });
               return dashboard?.planName === 'Elite Plus' && typeof dashboard?.planKG === 'number' && dashboard.planKG > 0 && (
-                <div className="mb-2">
-                  <div className="text-gray-600">KG Usage:</div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-48 h-3 bg-gray-200 rounded-full overflow-hidden">
-                      <div className="h-3 bg-blue-500 rounded-full" style={{ width: `${Math.min(100, Math.round(((dashboard.usage || 0) / dashboard.planKG) * 100))}%` }}></div>
-                    </div>
-                    <span className="font-semibold text-blue-700">{dashboard.usage || 0} / {dashboard.planKG} KG</span>
+              <div className="mb-2">
+                <div className="text-gray-600">KG Usage:</div>
+                <div className="flex items-center gap-2">
+                  <div className="w-48 h-3 bg-gray-200 rounded-full overflow-hidden">
+                    <div className="h-3 bg-blue-500 rounded-full" style={{ width: `${Math.min(100, Math.round(((dashboard.usage || 0) / dashboard.planKG) * 100))}%` }}></div>
                   </div>
+                  <span className="font-semibold text-blue-700">{dashboard.usage || 0} / {dashboard.planKG} KG</span>
                 </div>
+              </div>
               );
             })()}
             {/* Elite Amount Usage */}
@@ -492,19 +757,21 @@ const Dashboard = () => {
             )}
             {/* Show Renew/Upgrade buttons only if plan is not active or expired */}
             {!dashboard?.planStatus || dashboard.planStatus !== 'Active' || (dashboard.planExpired && new Date(dashboard.planExpired) < new Date()) ? (
-              <div className="mt-4 flex gap-4">
+            <div className="mt-4 flex gap-4">
                 <Button
-                  className="px-6 py-2 bg-blue-600 text-white rounded-lg shadow hover:bg-blue-700 font-semibold transition"
+                className="px-6 py-2 bg-blue-600 text-white rounded-lg shadow hover:bg-blue-700 font-semibold transition"
                   onClick={() => { setUpgradePlan(nextPlan); setShowUpgradeModal(true); }}
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" className="mr-2 h-4 w-4"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.75L3 8"/><path d="M3 3v5h5"/><path d="M21 12a9 9 0 0 0-9 9 9.75 9.75 0 0 0 6.74-2.75L21 16"/><path d="M16 16h5v5"/></svg>
                   Renew Plan
                 </Button>
-              </div>
+            </div>
             ) : null}
           </>
         ) : (
-          <div className="text-gray-500">No plan found. Please purchase a plan.</div>
+          <div className="text-gray-500 flex flex-col items-center gap-4">
+            <div className="text-lg font-semibold">No active subscription plan found.</div>
+          </div>
         )}
       </div>
 
@@ -538,7 +805,11 @@ const Dashboard = () => {
                 {(dashboard.payments || []).slice(0, 2).map((p, i) => (
                   <tr key={i} className={`border-t ${i % 2 === 0 ? 'bg-gray-50 dark:bg-gray-800' : 'bg-white dark:bg-gray-900'} hover:bg-blue-50 dark:hover:bg-blue-950 transition`}>
                     <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{p.date}</td>
-                    <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">₹{p.amount}</td>
+                    <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">
+                      {p.method === 'Plan' && p.amount === 0
+                        ? <span className="text-green-700 font-semibold">Plan Covered</span>
+                        : `₹${p.amount}`}
+                    </td>
                     <td className="py-3 px-6 align-middle">
                       <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${p.status === 'Success' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>{p.status}</span>
                     </td>
@@ -587,7 +858,11 @@ const Dashboard = () => {
                     .map((p, i) => (
                     <tr key={i} className={`border-t ${i % 2 === 0 ? 'bg-gray-50 dark:bg-gray-800' : 'bg-white dark:bg-gray-900'} hover:bg-blue-50 dark:hover:bg-blue-950 transition`}>
                       <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{p.date}</td>
-                      <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">₹{p.amount}</td>
+                      <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">
+                        {p.method === 'Plan' && p.amount === 0
+                          ? <span className="text-green-700 font-semibold">Plan Covered</span>
+                          : `₹${p.amount}`}
+                      </td>
                       <td className="py-3 px-6 align-middle">
                         <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${p.status === 'Success' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>{p.status}</span>
                       </td>
@@ -634,7 +909,6 @@ const Dashboard = () => {
                 <tr className="bg-green-100 dark:bg-green-900">
                   <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Service</th>
                   <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Pickup Date</th>
-                  <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Pickup Time</th>
                   <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Address</th>
                   <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Status</th>
                   <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Created At</th>
@@ -645,27 +919,34 @@ const Dashboard = () => {
                   <tr key={b.id || i} className={`border-t ${i % 2 === 0 ? 'bg-gray-50 dark:bg-gray-800' : 'bg-white dark:bg-gray-900'} hover:bg-green-50 dark:hover:bg-green-950 transition`}>
                     <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.service}</td>
                     <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.pickupDate}</td>
-                    <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.pickupTime}</td>
                     <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.address}</td>
                     <td className="py-3 px-6 align-middle">
                       <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${
                         b.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 
                         b.status === 'accepted' ? 'bg-blue-100 text-blue-700' : 
-                        b.status === 'completed' && !b.paidAt ? 'bg-orange-100 text-orange-700' : 
-                        b.status === 'completed' && b.paidAt ? 'bg-purple-100 text-purple-700' :
+                        b.status === 'completed' && !b.paymentConfirmed ? 'bg-orange-100 text-orange-700' :
+                        b.status === 'completed' && b.paymentConfirmed ? 'bg-purple-100 text-purple-700' :
+                        b.status === 'cash_pending' ? 'bg-orange-100 text-orange-700' :
+                        b.status === 'credit_pending' ? 'Credit Pending' :
+                        b.status === 'credit_used_pending_refill' ? 'Paid by Credit' :
                         'bg-gray-100 text-gray-700'
                       }`}>
-                        {b.status === 'completed' && !b.paidAt ? 'Payment Pending' :
-                         b.status === 'completed' && b.paidAt ? 'Paid' :
+                        {b.status === 'completed' && !b.paymentConfirmed ? 'Payment Pending' :
+                         b.status === 'awaiting_payment' ? 'Payment Pending' :
+                         b.status === 'completed' && b.paymentConfirmed ? 'Completed' :
+                         b.status === 'cash_pending' ? 'Cash Pending' :
+                         b.status === 'credit_pending' ? 'Credit Pending' :
+                         b.status === 'credit_used_pending_refill' ? 'Paid by Credit' :
                          b.status || 'pending'}
                       </span>
-                      {b.status === 'completed' && !b.paidAt && (
-                        <Button className="ml-2 px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded" onClick={() => handleOpenPayNowModal(b)}>
+                      {/* Pay Now Button */}
+                      {(b.status === 'awaiting_payment' || b.status === 'credit_pending') && b.amountDue > 0 && (
+                        <Button
+                          className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg shadow hover:bg-blue-700 font-semibold transition"
+                          onClick={() => handleOpenPayNowModal(b)}
+                        >
                           Pay Now
                         </Button>
-                      )}
-                      {b.status === 'completed' && b.paidAt && (
-                        <span className="ml-2 text-green-600 text-xs">Paid on {new Date(b.paidAt).toLocaleDateString()}</span>
                       )}
                     </td>
                     <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.createdAt?.toDate ? b.createdAt.toDate().toLocaleString() : ''}</td>
@@ -690,7 +971,6 @@ const Dashboard = () => {
                   <tr className="bg-green-100 dark:bg-green-900">
                     <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Service</th>
                     <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Pickup Date</th>
-                    <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Pickup Time</th>
                     <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Address</th>
                     <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Status</th>
                     <th className="py-3 px-6 text-green-900 dark:text-green-100 text-base font-bold">Created At</th>
@@ -701,27 +981,34 @@ const Dashboard = () => {
                     <tr key={b.id || i} className={`border-t ${i % 2 === 0 ? 'bg-gray-50 dark:bg-gray-800' : 'bg-white dark:bg-gray-900'} hover:bg-green-50 dark:hover:bg-green-950 transition`}>
                       <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.service}</td>
                       <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.pickupDate}</td>
-                      <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.pickupTime}</td>
                       <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.address}</td>
                       <td className="py-3 px-6 align-middle">
                         <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${
                           b.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 
                           b.status === 'accepted' ? 'bg-blue-100 text-blue-700' : 
-                          b.status === 'completed' && !b.paidAt ? 'bg-orange-100 text-orange-700' : 
-                          b.status === 'completed' && b.paidAt ? 'bg-purple-100 text-purple-700' :
+                          b.status === 'completed' && !b.paymentConfirmed ? 'bg-orange-100 text-orange-700' :
+                          b.status === 'completed' && b.paymentConfirmed ? 'bg-purple-100 text-purple-700' :
+                          b.status === 'cash_pending' ? 'bg-orange-100 text-orange-700' :
+                          b.status === 'credit_pending' ? 'Credit Pending' :
+                          b.status === 'credit_used_pending_refill' ? 'Paid by Credit' :
                           'bg-gray-100 text-gray-700'
                         }`}>
-                          {b.status === 'completed' && !b.paidAt ? 'Payment Pending' :
-                           b.status === 'completed' && b.paidAt ? 'Paid' :
+                          {b.status === 'completed' && !b.paymentConfirmed ? 'Payment Pending' :
+                           b.status === 'awaiting_payment' ? 'Payment Pending' :
+                           b.status === 'completed' && b.paymentConfirmed ? 'Completed' :
+                           b.status === 'cash_pending' ? 'Cash Pending' :
+                           b.status === 'credit_pending' ? 'Credit Pending' :
+                           b.status === 'credit_used_pending_refill' ? 'Paid by Credit' :
                            b.status || 'pending'}
                         </span>
-                        {b.status === 'completed' && !b.paidAt && (
-                          <Button className="ml-2 px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded" onClick={() => handleOpenPayNowModal(b)}>
+                        {/* Pay Now Button */}
+                        {(b.status === 'awaiting_payment' || b.status === 'credit_pending') && b.amountDue > 0 && (
+                          <Button
+                            className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg shadow hover:bg-blue-700 font-semibold transition"
+                            onClick={() => handleOpenPayNowModal(b)}
+                          >
                             Pay Now
                           </Button>
-                        )}
-                        {b.status === 'completed' && b.paidAt && (
-                          <span className="ml-2 text-green-600 text-xs">Paid on {new Date(b.paidAt).toLocaleDateString()}</span>
                         )}
                       </td>
                       <td className="py-3 px-6 text-gray-800 dark:text-white align-middle">{b.createdAt?.toDate ? b.createdAt.toDate().toLocaleString() : ''}</td>
@@ -916,10 +1203,44 @@ const Dashboard = () => {
             <div className="mb-4 text-lg">Amount Due: <span className="font-bold">₹{showPayNowModal.booking.amountDue || showPayNowModal.booking.usage || 0}</span></div>
             <div className="flex flex-col gap-3">
               <Button onClick={handlePayWithOnline} disabled={payNowLoading} className="bg-blue-600 text-white">Pay Online</Button>
-              <Button onClick={handlePayWithCredits} disabled={payNowLoading || (dashboard?.credits || 0) < (showPayNowModal.booking.amountDue || showPayNowModal.booking.usage || 0)} className="bg-green-600 text-white">
-                Pay with Credits ({dashboard?.credits || 0} available)
-              </Button>
               <Button onClick={handlePayWithCash} disabled={payNowLoading} className="bg-yellow-600 text-white">Pay with Cash</Button>
+              {/* NEW: Add Pay with Credit button */}
+              {dashboard && typeof dashboard.creditUsed === 'number' && (
+                <Button
+                  onClick={() => handlePayWithCredit(showPayNowModal.booking)}
+                  disabled={payNowLoading || (dashboard.creditUsed || 0) + (showPayNowModal.booking?.amountDue || showPayNowModal.booking?.usage || 0) > 500} // Disable if insufficient credit
+                  className="bg-indigo-600 text-white hover:bg-indigo-700"
+                >
+                  Pay with Credit (Available: ₹{500 - (dashboard.creditUsed || 0)})
+                </Button>
+              )}
+            </div>
+            {/* Debug information displayed in the UI */}
+            {showPayNowModal.open && showPayNowModal.booking && dashboard && (
+                <div className="mt-4 text-sm text-gray-600">
+                    <p>Debug Info (Pay with Credit):</p>
+                    <p>payNowLoading: {String(payNowLoading)}</p>
+                    <p>dashboard.creditUsed: {dashboard?.creditUsed}</p>
+                    <p>booking amountDue: {showPayNowModal.booking.amountDue}</p>
+                    <p>booking usage: {showPayNowModal.booking.usage}</p>
+                    <p>Disabled Condition: {String(payNowLoading || (dashboard?.creditUsed || 0) + (showPayNowModal.booking?.amountDue || showPayNowModal.booking?.usage || 0) > 500)}</p>
+                </div>
+            )}
+          </div>
+        </div>
+      )}
+      {/* Refill Credit Modal */}
+      {showRefillCreditModal && dashboard && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full relative">
+            <button className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 text-2xl" onClick={() => setShowRefillCreditModal(false)} aria-label="Close">×</button>
+            <h2 className="text-xl font-bold mb-4 text-green-700">Refill Credit</h2>
+            {/* Display amount to refill */}
+            <div className="mb-4 text-lg">Amount to Refill: <span className="font-bold">₹{dashboard.creditUsed || 0}</span></div>
+            {/* Payment options */}
+            <div className="flex flex-col gap-3">
+              <Button onClick={handleRefillOnline} disabled={refillLoading} className="bg-blue-600 text-white">Pay Online</Button>
+              <Button onClick={handleRefillCash} disabled={refillLoading} className="bg-yellow-600 text-white">Pay with Cash</Button>
             </div>
           </div>
         </div>

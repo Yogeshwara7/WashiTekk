@@ -1,0 +1,1 @@
+export function loadImageAsBase64(imagePath: string, callback: (base64: string) => void): void; 

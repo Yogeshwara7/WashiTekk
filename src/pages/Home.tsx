@@ -17,7 +17,9 @@ const Home = () => {
         <main className="flex-grow">
           <HowItWorks />
           <Services />
-          <MembershipPlan />
+          <div id="membership-plans">
+            <MembershipPlan />
+          </div>
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-16">
             <div className="mb-12">
               <ContactHeader />

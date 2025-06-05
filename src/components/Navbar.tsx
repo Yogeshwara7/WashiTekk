@@ -8,7 +8,7 @@ import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import NotificationBell from './NotificationBell';
 
-const ADMIN_EMAILS = ['yogeshwara49@gmail.com'];
+const ADMIN_EMAILS = ['yogeshwara567@gmail.com'];
 
 const Navbar = () => {
   const [isOpen, setIsOpen] = useState(false);

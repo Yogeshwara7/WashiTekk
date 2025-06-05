@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, lazy, Suspense } from 'react';
 import { auth, db } from '../firebase';
 import { onAuthStateChanged } from 'firebase/auth';
-import { collection, getDocs, doc, updateDoc, deleteDoc, updateDoc as updateContactDoc, onSnapshot, addDoc, getDoc, query, orderBy } from 'firebase/firestore';
+import { collection, getDocs, doc, updateDoc, deleteDoc, updateDoc as updateContactDoc, onSnapshot, addDoc, getDoc, query, orderBy, where } from 'firebase/firestore';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
@@ -18,7 +18,8 @@ import { nanoid } from 'nanoid';
 import { toast } from 'react-toastify';
 import TabSortOptions from '../components/TabSortOptions';
 import { sortUsers, sortBookings, sortHistory, sortFeedback } from '../utils/sortUtils';
-import { generateReceipt, loadImageAsBase64 } from '../utils/generateReceipt';
+import { generateReceipt } from '../utils/generateReceipt';
+import { loadImageAsBase64 } from '../utils/loadImageAsBase64';
 
 // Lazy load tab components
 const UsersTab = lazy(() => import('../components/dashboard/UsersTab'));
@@ -27,9 +28,10 @@ const HistoryTab = lazy(() => import('../components/dashboard/HistoryTab'));
 const FeedbackTab = lazy(() => import('../components/dashboard/FeedbackTab'));
 const PlanRequestsTab = lazy(() => import('../components/dashboard/PlanRequestsTab'));
 const AnalyticsTab = lazy(() => import('../components/dashboard/AnalyticsTab'));
+const CreditsUsedTab = lazy(() => import('../components/dashboard/CreditsUsedTab'));
 
 // List of admin emails (replace with your admin email(s))
-const ADMIN_EMAILS = ['yogeshwara49@gmail.com'];
+const ADMIN_EMAILS = ['yogeshwara567@gmail.com'];
 
 // Add interface for plan request user
 interface PlanRequestUser {
@@ -61,6 +63,7 @@ export interface Booking {
   username?: string;
   name?: string;
   email?: string;
+  phone?: string;
   pickupDate?: string;
   pickupTime?: string;
   address?: string;
@@ -70,6 +73,8 @@ export interface Booking {
   planName?: string;
   amountDue?: number;
   isNoPlanBooking?: boolean;
+  paymentConfirmed?: boolean;
+  creditAmountUsedInBooking?: number;
 }
 
 interface Message {
@@ -205,6 +210,9 @@ const AdminDashboard = () => {
           case 'history':
              // Assuming history search is handled within HistoryTab
             break;
+          case 'creditsUsed': // Add case for the new tab
+            // Assuming credit bookings search is handled within CreditsUsedTab
+            break;
         }
       }
       
@@ -286,8 +294,16 @@ const AdminDashboard = () => {
     setModalOpen(true);
   };
 
-  // Filter bookings for the Bookings tab (all except paid and rejected)
-  const bookingsForBookingsTab = bookings.filter(b => b?.status !== 'paid' && b?.status !== 'rejected');
+  // Filter bookings for the Bookings tab (only active bookings: pending, awaiting finalization, or awaiting payment)
+  const activeBookings = bookings.filter(b =>
+    b?.status === 'pending' ||
+    (b?.status === 'accepted' && (
+      (!(b?.isNoPlanBooking) && typeof b?.usage === 'undefined') ||
+      (b?.isNoPlanBooking && typeof b?.amountDue === 'undefined')
+    )) ||
+    ((b?.status === 'completed' && !(b?.isNoPlanBooking) && b?.paymentConfirmed === false) ||
+      b?.status === 'cash_pending')
+  );
 
   // Filter bookings for the History tab (only completed/paid)
   const bookingHistory = bookings.filter(b => b?.status === 'completed' || b?.status === 'paid');
@@ -361,7 +377,7 @@ const AdminDashboard = () => {
           className={tab === 'bookings' ? 'bg-purple-600 text-white' : 'border border-gray-300 bg-white text-gray-800'}
           onClick={() => setTab('bookings')}
         >
-          Bookings ({bookingsForBookingsTab.length})
+          Bookings ({activeBookings.length})
                           </Button>
         {/* Plan Requests Tab */}
          <Button
@@ -395,6 +411,14 @@ const AdminDashboard = () => {
         >
           Feedback & Support ({unreadFeedback} unread)
         </Button>
+        {/* Credits Used Tab */}
+        <Button
+          variant="outline"
+          className={tab === 'creditsUsed' ? 'bg-purple-600 text-white' : 'border border-gray-300 bg-white text-gray-800'}
+          onClick={() => setTab('creditsUsed')}
+        >
+          Credits Used
+        </Button>
           </div>
 
       {/* Tab Content */}
@@ -407,15 +431,13 @@ const AdminDashboard = () => {
             />
           )}
           {tab === 'bookings' && (
-            <Suspense fallback={<div>Loading...</div>}>
-              <BookingsTab 
-                bookings={bookings} 
-                onBookingsChange={handleBookingsChange}
-                users={users}
-                generateReceipt={generateReceipt}
-                loadImageAsBase64={loadImageAsBase64}
-              />
-            </Suspense>
+            <BookingsTab 
+              bookings={bookings} 
+              onBookingsChange={setBookings}
+              users={users}
+              generateReceipt={generateReceipt}
+              loadImageAsBase64={loadImageAsBase64}
+            />
           )}
           {tab === 'plans' && <PlanRequestsTab />}
           {tab === 'history' && <HistoryTab bookings={bookingHistory} onBookingsChange={handleBookingsChange} />}
@@ -430,6 +452,7 @@ const AdminDashboard = () => {
              />
           )}
           {tab === 'feedback' && <FeedbackTab messages={messages} onMessagesChange={handleMessagesChange} />}
+          {tab === 'creditsUsed' && <CreditsUsedTab />}
         </Suspense>
         </div>
 

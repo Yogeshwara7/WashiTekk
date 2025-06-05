@@ -6,7 +6,7 @@ import { useNavigate } from 'react-router-dom';
 import { formatDistanceToNow } from 'date-fns';
 
 // Admin emails constant
-const ADMIN_EMAILS = ['yogeshwara49@gmail.com'];
+const ADMIN_EMAILS = ['yogeshwara567@gmail.com'];
 
 interface Notification {
   id: string;

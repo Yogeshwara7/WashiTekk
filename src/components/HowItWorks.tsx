@@ -46,7 +46,7 @@ const HowItWorks = () => {
               <br />
               Leave the laundry to us.
             </h2>
-            <a href="/how-it-works" className="inline-flex items-center text-blue-600 hover:text-blue-700 font-medium">
+            <a href="/how-it-works" className="inline-flex items-center text-blue-800 hover:text-blue-900 font-medium">
               How it works
               <svg className="w-5 h-5 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
@@ -62,7 +62,7 @@ const HowItWorks = () => {
                     </div>
                     <div>
                       <h3 className="font-semibold text-lg text-gray-900">{step.title}</h3>
-                      <p className="mt-1" style={{ color: colors.subHeadline }}>{step.description}</p>
+                      <p className="mt-1" style={{ color: '#00473e' }}>{step.description}</p>
                     </div>
                   </div>
                 </div>

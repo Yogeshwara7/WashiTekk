@@ -19,6 +19,8 @@ import AdminDashboard from './pages/AdminDashboard';
 import Dashboard from './pages/Dashboard';
 import VerifyReceipt from './pages/VerifyReceipt';
 import ScrollToTop from './components/ScrollToTop';
+import VerifyEmail from './pages/VerifyEmail';
+import ModernAuthForm from './components/ModernAuthForm';
 
 function App() {
   return (
@@ -43,6 +45,13 @@ function App() {
             <Route path="/admin" element={<AdminDashboard />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/verify" element={<VerifyReceipt />} />
+            
+            {/* Authentication Routes using ModernAuthForm */}
+            <Route path="/login" element={<ModernAuthForm mode="login" />} />
+            <Route path="/signup" element={<ModernAuthForm mode="signup" />} />
+            
+            <Route path="/membership" element={<MembershipPlan />} />
+            <Route path="/verify-email" element={<VerifyEmail />} />
           </Routes>
         </main>
 

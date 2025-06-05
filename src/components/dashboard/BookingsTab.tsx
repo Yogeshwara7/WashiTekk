@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Textarea } from '../ui/textarea';
-import { doc, updateDoc, collection, addDoc, Timestamp, getDocs, getDoc } from 'firebase/firestore';
+import { doc, updateDoc, collection, addDoc, Timestamp, getDocs, getDoc, deleteDoc } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { toast } from 'react-toastify';
 import TabSortOptions from '../TabSortOptions';
@@ -45,10 +45,10 @@ interface BookingsTabProps {
   onBookingsChange: (bookings: Booking[]) => void;
   users: any[];
   generateReceipt: (payment: any, user: any, dashboard: any, signatureBase64: string) => void;
-  loadImageAsBase64: (path: string, callback: (base64: string) => void) => void;
+  loadImageAsBase64: (imagePath: string, callback: (base64: string) => void) => void;
 }
 
-const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadImageAsBase64 }: BookingsTabProps): JSX.Element => {
+const BookingsTab: React.FC<BookingsTabProps> = ({ bookings, onBookingsChange, users, generateReceipt, loadImageAsBase64 }) => {
   const [bookingSearch, setBookingSearch] = useState('');
   const [acceptedSearch, setAcceptedSearch] = useState('');
   const [bookingActionLoading, setBookingActionLoading] = useState('');
@@ -87,7 +87,9 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
 
   const awaitingPaymentBookingsList = bookings.filter(b =>
     (b?.status === 'completed' && !(b?.isNoPlanBooking) && b?.paymentConfirmed === false) ||
-    (b?.status === 'cash_pending')
+    (b?.status === 'cash_pending') ||
+    (b?.status === 'credit_pending') ||
+    (b?.status === 'awaiting_payment')
   );
 
   // Filter pending bookings based on search
@@ -280,47 +282,60 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
         const userData = userSnapshot.data();
         const prevPayments = userData?.payments || [];
 
-        const paymentRecord = {
-          date: new Date().toLocaleString(),
-          amount: booking.amountDue || booking.usage || 0,
-          status: 'Success',
-          method: booking.paymentMethod || 'N/A',
-          bookingId: booking.id,
-        };
+        // Find the pending cash payment record for this booking
+        const updatedPayments = prevPayments.map(payment => {
+          if (payment.bookingId === booking.id && payment.status === 'Pending (Cash)' && payment.method === 'cash') {
+            // Update the status of the pending cash payment record
+            return { ...payment, status: 'Success', date: new Date().toLocaleString() };
+          } else {
+            return payment;
+          }
+        });
+
+        // If no pending cash payment was found (e.g., manually marked as paid), add a new one as a fallback
+        const pendingCashPaymentUpdated = updatedPayments.some(payment => 
+          payment.bookingId === booking.id && payment.status === 'Success'
+        );
+        
+        let finalPayments = updatedPayments;
+        if (!pendingCashPaymentUpdated) {
+            console.warn(`[BookingsTab] Pending cash payment record not found for booking ${booking.id}. Adding a new 'Success' record as fallback.`);
+            const newPaymentRecord = {
+                date: new Date().toLocaleString(),
+                amount: booking.amountDue || booking.usage || 0,
+                status: 'Success',
+                method: booking.paymentMethod || 'cash', // Use booking method, default to cash
+                bookingId: booking.id,
+            };
+            finalPayments = [...updatedPayments, newPaymentRecord];
+        }
 
         await updateDoc(userRef, {
-          payments: [...prevPayments, paymentRecord],
+          payments: finalPayments,
         });
 
-        // Generate receipt after payment is confirmed
-        loadImageAsBase64('/signn.png', (signatureBase64) => {
-          generateReceipt(paymentRecord, userDoc, userData, signatureBase64);
-        });
+        // Add notification
+        const notificationMessage = `Payment of ₹${booking.amountDue || booking.usage || 0} confirmed for your booking ${booking.customBookingId || booking.id}.`;
 
-        // Add notification to user about payment confirmation
-        if (booking.email) {
-          const notificationMessage = `Payment of ₹${booking.amountDue || booking.usage || 0} confirmed for your booking ${booking.customBookingId || booking.id}.`;
-
-          await addDoc(collection(db, 'users', userDoc.id, 'notifications'), {
-            title: 'Payment Confirmed',
-            message: notificationMessage,
-            type: 'payment',
-            priority: 'high',
-            metadata: {
-              bookingId: booking.id,
-              amountPaid: booking.amountDue || booking.usage || 0,
-            },
-            read: false,
-            createdAt: Timestamp.now(),
-          });
-        }
-      }
+           await addDoc(collection(db, 'users', userDoc.id, 'notifications'), {
+             title: 'Payment Confirmed',
+          message: notificationMessage,
+          type: 'payment',
+             priority: 'high',
+             metadata: {
+               bookingId: booking.id,
+            amountPaid: booking.amountDue || booking.usage || 0,
+             },
+             read: false,
+             createdAt: Timestamp.now(),
+           });
+         }
       toast.success('Payment confirmed successfully!');
     } catch (error) {
       console.error('Error confirming payment:', error);
       toast.error('Failed to confirm payment');
     } finally {
-      setBookingActionLoading('');
+    setBookingActionLoading('');
     }
   };
 
@@ -332,70 +347,188 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
 
     try {
       let updateData: any = {};
+      let calculatedAmountDue = 0;
+      let bookingCost = 0;
+      let remainingBalance = 0;
+      let coveredByPlan = 0;
 
-      if (booking.isNoPlanBooking) {
-        // No-plan booking: confirm payment (This button should only appear in the Awaiting Initial section)
-        // If called from here, it means the user confirmed payment immediately after accepting
-        updateData.status = 'paid';
-        updateData.amountDue = typeof amountPaidModal === 'string' ? parseFloat(amountPaidModal) : amountPaidModal;
-        updateData.paidAt = new Date().toISOString();
-         // For no-plan bookings, payment is confirmed immediately, so paymentConfirmed is true
-        updateData.paymentConfirmed = true; // Add this for consistency
+      // For all bookings (both plan and no-plan), enter KG and calculate base amount
+      const quantity = typeof kgUsed === 'string' ? parseFloat(kgUsed) : kgUsed;
+      updateData.usage = quantity;
 
+      if (quantity !== undefined && !isNaN(quantity as number)) {
+        calculatedAmountDue = (quantity as number) * 40; // ₹40/kg
+        bookingCost = calculatedAmountDue; // Base cost before plan deduction
       } else {
-        // Plan booking: enter KG used (This button should only appear in the Awaiting Initial section)
-        updateData.status = 'completed'; // Status is completed after KG entry
-        updateData.usage = typeof kgUsed === 'string' ? parseFloat(kgUsed) : kgUsed;
-        // Calculate amount due based on KG used (1 KG = ₹40)
-        if (updateData.usage !== undefined && !isNaN(updateData.usage as number)) {
-          updateData.amountDue = (updateData.usage as number) * 40;
-        }
-        // Mark payment as not confirmed yet for plan bookings
-        updateData.paymentConfirmed = false;
-        updateData.finalizedAt = new Date().toISOString();
+          // If quantity is invalid, set calculated amount and cost to 0
+          calculatedAmountDue = 0;
+          bookingCost = 0;
       }
 
+      // Set initial amountDue based on calculated amount for no-plan bookings
+      // For plan bookings, this will be adjusted below
+      updateData.amountDue = calculatedAmountDue; // Initialize amountDue
+
+        updateData.finalizedAt = new Date().toISOString();
+
+      if (!booking.isNoPlanBooking) {
+        // Plan booking: Deduct usage from user's plan
+        const userDoc = users.find(u => u.email === booking.email);
+        if (userDoc) {
+          const userRef = doc(db, 'users', userDoc.id);
+          const userSnapshot = await getDoc(userRef);
+          const userData = userSnapshot.data();
+
+          if (userData) {
+            let userUpdateData: any = {};
+            const currentUsageKG = userData.usage || 0;
+            const currentAmountUsed = userData.amountUsed || 0;
+            const userPlanPrice = userData.planPrice || 0;
+
+            if (userData.planName === 'Elite Plus') { // 10k plan (KG based)
+              const kgToDeduct = quantity; // Use the parsed quantity
+              if (kgToDeduct !== undefined && !isNaN(kgToDeduct)) {
+                // Update user's KG usage
+                userUpdateData.usage = currentUsageKG + kgToDeduct;
+                console.log(`[BookingsTab] Deducted ${kgToDeduct} KG from Elite Plus user ${userDoc.id}. New usage: ${userUpdateData.usage}`);
+
+                // Calculate amount and plan coverage
+                const totalAmount = kgToDeduct * 40; // ₹40/kg
+                remainingBalance = userPlanPrice - currentAmountUsed;
+
+                // Plan covers the full amount if there's enough balance
+                coveredByPlan = Math.min(totalAmount, remainingBalance);
+
+                // Set amount due (should be 0 if plan covers everything)
+                updateData.amountDue = totalAmount - coveredByPlan; // Update amountDue for plan bookings
+
+                // Update plan usage with actual amount used from the plan
+                userUpdateData.amountUsed = currentAmountUsed + coveredByPlan;
+
+                console.log(`[BookingsTab] Elite Plus user ${userDoc.id}:
+                  - Booking: ${kgToDeduct} KG = ₹${totalAmount}
+                  - Plan balance: ₹${remainingBalance}
+                  - Plan covers: ₹${coveredByPlan}
+                  - Amount due: ₹${updateData.amountDue}
+                `);
+              }
+            } else if (userData.planName === 'Elite') { // 3k plan (Amount based)
+              remainingBalance = userPlanPrice - currentAmountUsed;
+              coveredByPlan = Math.min(bookingCost, remainingBalance);
+
+              userUpdateData.amountUsed = currentAmountUsed + coveredByPlan;
+              updateData.amountDue = bookingCost - coveredByPlan; // Update amountDue for plan bookings
+
+              console.log(`[BookingsTab] Elite user ${userDoc.id}: Booking cost ₹${bookingCost}, Remaining plan balance ₹${remainingBalance}. Covered by plan ₹${coveredByPlan}, Amount Due ₹${updateData.amountDue}`);
+              console.log(`[BookingsTab] Elite user ${userDoc.id}. New amount used: ${userUpdateData.amountUsed}`);
+            }
+
+            if (Object.keys(userUpdateData).length > 0) {
+              await updateDoc(userRef, userUpdateData);
+              console.log(`[BookingsTab] Successfully updated usage/amount used for user ${userDoc.id}`);
+            }
+          }
+        }
+      }
+
+      // Determine final status and paymentConfirmed based on the calculated amountDue
+      if (updateData.amountDue !== undefined && updateData.amountDue <= 0) {
+         // Amount due is zero or less (fully covered by plan)
+         updateData.paymentConfirmed = true;
+         updateData.status = 'completed'; // Set status to completed
+         updateData.paidAt = new Date().toISOString();
+         // Add payment record to user's payments array for plan-covered bookings
+         if (!booking.isNoPlanBooking && coveredByPlan > 0) { // Only add payment record if plan covered something
+           const userDoc = users.find(u => u.email === booking.email);
+           if (userDoc) {
+             const userRef = doc(db, 'users', userDoc.id);
+             const userSnapshot = await getDoc(userRef);
+             const userData = userSnapshot.data();
+             const prevPayments = userData?.payments || [];
+             const paymentRecord = {
+               date: updateData.paidAt,
+               // Use coveredByPlan as the amount for the payment record if covered by plan, otherwise 0
+               amount: coveredByPlan > 0 ? coveredByPlan : 0,
+               status: 'Success',
+               method: booking.planName ? 'Plan' : (booking.paymentMethod || 'N/A'),
+               bookingId: booking.id,
+             };
+             // Only add if not already present (avoid duplicates)
+             const alreadyExists = prevPayments.some(p => p.bookingId === booking.id && p.method === 'Plan'); // Check for Plan method specifically
+             if (!alreadyExists) {
+               await updateDoc(userRef, { payments: [...prevPayments, paymentRecord] });
+                console.log(`[BookingsTab] Added plan payment record for booking ${booking.id} to user ${userDoc.id}`);
+             }
+           }
+         }
+      } else {
+          // Amount due is greater than zero, requires payment
+          updateData.paymentConfirmed = false; // Explicitly set to false
+          updateData.status = 'awaiting_payment'; // Set status to awaiting_payment
+          console.log(`[BookingsTab] Booking ${booking.id} requires payment. Amount due: ${updateData.amountDue}`);
+      }
+
+
+      // Add debug logs here (keep them to verify the updateData)
+       console.log('[BookingsTab Debug - Finalize]');
+       console.log('  booking ID:', booking.id);
+       console.log('  kgUsed:', kgUsed);
+       console.log('  calculatedAmountDue (base):', calculatedAmountDue);
+       console.log('  updateData before updateDoc:', updateData);
+
+
+      // Now update the booking document with all the finalized data
       await updateDoc(doc(db, 'bookings', booking.id), updateData);
+      console.log(`[BookingsTab] Successfully updated booking ${booking.id} with data:`, updateData);
 
-      // onBookingsChange will update the main bookings state in AdminDashboard,
-      // which will then cause this component to re-render with the updated list.
-      // The filtering logic above will place the booking in the correct list.
-      // No need to manually update state here like before.
-      // onBookingsChange(bookings.map(b => b.id === booking.id ? { ...b, ...updateData } : b));
-
-      // Add notification to user about completion/payment confirmation
+      // Add notification to user
       if (booking.email) {
          const usersRef = collection(db, 'users');
          const userSnap = await getDocs(usersRef);
          const userDoc = userSnap.docs.find(u => u.data().email === booking.email);
 
          if (userDoc) {
-           let notificationMessage = `Your booking for ${booking.service} is completed.`;
-           if (booking.isNoPlanBooking && updateData.status === 'paid') {
-             notificationMessage = `Payment of ₹${updateData.amountDue} confirmed for your ${booking.service} booking.`;
-           } else if (updateData.status === 'completed' && updateData.usage !== undefined) {
-             notificationMessage = `Booking completed. Usage: ${updateData.usage} kg.${updateData.amountDue !== undefined ? ` Amount: ₹${updateData.amountDue}` : ''}`;
+          let notificationMessage = '';
+          // Use the final amountDue from updateData for the notification message
+          const finalAmountDue = updateData.amountDue || 0; // Use 0 if amountDue is null or undefined
+          const finalUsage = updateData.usage || 0;
+
+          if (booking.isNoPlanBooking) {
+             notificationMessage = `Your booking for ${booking.service} has been finalized. Usage: ${finalUsage} kg. Amount due: ₹${finalAmountDue}. Please proceed with payment.`;
+          } else {
+            // For plan bookings, mention plan coverage if applicable
+             const planCoverageText = coveredByPlan > 0 ? ` (₹${coveredByPlan} covered by plan)` : '';
+             notificationMessage = `Your booking for ${booking.service} has been finalized. Usage: ${finalUsage} kg. Amount due: ₹${finalAmountDue}${planCoverageText}. Please proceed with payment.`;
            }
 
            await addDoc(collection(db, 'users', userDoc.id, 'notifications'), {
-             title: booking.isNoPlanBooking ? 'Payment Confirmed' : 'Booking Completed',
+             title: 'Booking Finalized', // Changed notification title
              message: notificationMessage,
              type: 'booking',
              priority: 'high',
              metadata: {
                bookingId: booking.id,
                service: booking.service,
-               status: updateData.status,
-               usage: updateData.usage,
-               amountPaid: updateData.amountDue,
+               status: updateData.status, // Use the updated status
+               usage: finalUsage,
+               amountDue: typeof finalAmountDue === 'number' ? finalAmountDue : null, // Use finalAmountDue, ensure number or null
              },
              read: false,
              createdAt: Timestamp.now(),
            });
+            console.log('[BookingsTab] Notification sent to user.');
          }
       }
 
-      toast.success(booking.isNoPlanBooking ? 'Payment confirmed!' : 'Booking finalized!');
+      // Display success toast based on the final status
+      if (updateData.status === 'completed') {
+          toast.success('Booking finalized and paid by plan!');
+      } else if (updateData.status === 'awaiting_payment') {
+          toast.success('Booking finalized! Awaiting user payment.');
+      } else {
+          toast.success('Booking finalized successfully!'); // Generic success if status is something unexpected
+      }
+
 
     } catch (error) {
       console.error('Error finalizing booking:', error);
@@ -404,7 +537,6 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
     setBookingActionLoading('');
     setShowFinalizeModal({ open: false, booking: null });
     setKgUsed('');
-    setAmountPaid('');
   };
 
   // Function to open the details modal
@@ -566,7 +698,6 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
             <tr>
               <th className="py-2 px-4">User</th>
               <th className="py-2 px-4">Service</th>
-              <th className="py-2 px-4">Customer</th>
               <th className="py-2 px-4">Pickup Date</th>
               <th className="py-2 px-4">Address</th>
               <th className="py-2 px-4">Status</th>
@@ -579,7 +710,7 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
               <tr key={booking?.id} className={i % 2 === 0 ? 'bg-gray-50 hover:bg-gray-100 transition' : 'hover:bg-gray-100 transition'}>
                 <td className="py-2 px-4 align-middle">
                   <div>{booking?.name || booking?.username || 'N/A'}</div>
-                  <div className="text-xs text-gray-500">{booking?.email}</div>
+                  <div className="text-gray-500 text-xs">{booking?.email || 'N/A'}</div>
                 </td>
                 <td className="py-2 px-4 align-middle">{booking?.service}</td>
                 <td className="py-2 px-4 align-middle">{booking?.pickupDate}</td>
@@ -619,7 +750,7 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
             ))}
             {currentPending.length === 0 && (
               <tr>
-                <td colSpan={7} className="text-center py-4 text-gray-500">No pending requests</td>
+                <td colSpan={6} className="text-center py-4 text-gray-500">No pending requests</td>
               </tr>
             )}
           </tbody>
@@ -656,7 +787,6 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
                  <tr>
                    <th className="py-2 px-4">User</th>
                    <th className="py-2 px-4">Service</th>
-                   <th className="py-2 px-4">Customer</th>
                    <th className="py-2 px-4">Pickup Date</th>
                    <th className="py-2 px-4">Address</th>
                    <th className="py-2 px-4">Status</th>
@@ -669,7 +799,7 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
                    <tr key={booking?.id} className={i % 2 === 0 ? 'bg-gray-50 hover:bg-gray-100 transition' : 'hover:bg-gray-100 transition'}>
                      <td className="py-2 px-4 align-middle">
                        <div>{booking?.name || booking?.username || 'N/A'}</div>
-                       <div className="text-xs text-gray-500">{booking?.email}</div>
+                       <div className="text-gray-500 text-xs">{booking?.email || 'N/A'}</div>
                      </td>
                      <td className="py-2 px-4 align-middle">{booking?.service}</td>
                      <td className="py-2 px-4 align-middle">{booking?.pickupDate}</td>
@@ -678,16 +808,14 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
                        <span className={
                           `inline-block px-2 py-1 rounded text-xs font-bold ${booking?.status === 'accepted' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'}`
                         }>
-                         {/* Display Accepted status if it's this section */}
-                          {booking?.status === 'accepted' ? 'Accepted' : booking?.status?.charAt(0).toUpperCase() + booking?.status?.slice(1)}
+                         {booking?.status === 'accepted' ? 'Accepted' : booking?.status?.charAt(0).toUpperCase() + booking?.status?.slice(1)}
                         </span>
                      </td>
                      <td className="py-2 px-4 align-middle">
                        <Button variant="outline" size="sm" onClick={() => handleViewDetails(booking!)}>View Details</Button>
                      </td>
                      <td className="py-2 px-4 align-middle">
-                       {/* Finalize buttons for accepted bookings */}
-                        {(booking?.status === 'accepted' && !(booking?.isNoPlanBooking) && typeof booking?.usage === 'undefined') && (
+                       {(booking?.status === 'accepted' && !(booking?.isNoPlanBooking) && typeof booking?.usage === 'undefined') && (
                           <Button
                             size="sm"
                             onClick={() => setShowFinalizeModal({ open: true, booking: booking! })} 
@@ -710,9 +838,9 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
                      </td>
                    </tr>
                  ))}
-                 {currentAwaitingInitial.length === 0 && ( // Corrected check
+                 {currentAwaitingInitial.length === 0 && (
                    <tr>
-                     <td colSpan={7} className="text-center py-4 text-gray-500">No accepted bookings needing finalization</td>
+                     <td colSpan={6} className="text-center py-4 text-gray-500">No accepted bookings needing finalization</td>
                    </tr>
                  )}
                </tbody>
@@ -751,7 +879,6 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
                  <tr>
                    <th className="py-2 px-4">User</th>
                    <th className="py-2 px-4">Service</th>
-                   <th className="py-2 px-4">Customer</th>
                    <th className="py-2 px-4">Pickup Date</th>
                    <th className="py-2 px-4">Address</th>
                    <th className="py-2 px-4">Status</th>
@@ -764,40 +891,54 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
                    <tr key={booking?.id} className={i % 2 === 0 ? 'bg-gray-50 hover:bg-gray-100 transition' : 'hover:bg-gray-100 transition'}>
                      <td className="py-2 px-4 align-middle">
                        <div>{booking?.name || booking?.username || 'N/A'}</div>
-                       <div className="text-xs text-gray-500">{booking?.email}</div>
+                       <div className="text-gray-500 text-xs">{booking?.email || 'N/A'}</div>
                      </td>
                      <td className="py-2 px-4 align-middle">{booking?.service}</td>
                      <td className="py-2 px-4 align-middle">{booking?.pickupDate}</td>
                      <td className="py-2 px-4 align-middle">{booking?.address}</td>
                      <td className="py-2 px-4 align-middle">
-                       <span className={
-                          `inline-block px-2 py-1 rounded text-xs font-bold ${
-                            (booking?.status === 'completed' && booking?.paymentConfirmed === false) || booking?.status === 'cash_pending' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-700'
-                          }`}>
-                           {(booking?.status === 'completed' && booking?.paymentConfirmed === false) || booking?.status === 'cash_pending' ? 'Payment Pending' : booking?.status?.charAt(0).toUpperCase() + booking?.status?.slice(1)}
-                         </span>
-                      </td>
+                       <span className={`inline-block px-2 py-1 rounded text-xs font-bold ${
+                         booking.status === 'pending' ? 'bg-yellow-100 text-yellow-700' :
+                         booking.status === 'accepted' ? 'bg-blue-100 text-blue-700' :
+                         booking.status === 'completed' ? 'bg-purple-100 text-purple-700' :
+                         booking.status === 'paid' ? 'bg-green-100 text-green-700' :
+                         booking.status === 'cash_pending' ? 'bg-orange-100 text-orange-700' :
+                         booking.status === 'credit_pending' ? 'bg-indigo-100 text-indigo-700' :
+                         'bg-gray-100 text-gray-700'
+                       }`}>
+                         {booking.status === 'credit_pending' ? 'Credit Pending' : booking.status?.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                        </span>
+                     </td>
                      <td className="py-2 px-4 align-middle">
                        <Button variant="outline" size="sm" onClick={() => handleViewDetails(booking!)}>View Details</Button>
                      </td>
                      <td className="py-2 px-4 align-middle">
-                       {/* Confirm Cash Payment button for cash_pending bookings */}
-                        {booking?.status === 'cash_pending' && (
+                       {booking?.status === 'cash_pending' && (
                           <Button
                             size="sm"
-                            onClick={() => handleConfirmPayment(booking!)}
+                            onClick={() => handleConfirmPayment(booking!)} 
                             disabled={bookingActionLoading === booking?.id}
                             className="bg-yellow-600 hover:bg-yellow-700 text-white"
                           >
                             {bookingActionLoading === booking?.id ? 'Confirming Cash...' : 'Confirm Cash Received'}
                           </Button>
                         )}
+                        {booking?.status === 'credit_pending' && (
+                           <Button
+                             size="sm"
+                             onClick={() => handleConfirmPayment(booking!)} 
+                             disabled={bookingActionLoading === booking?.id}
+                             className="bg-indigo-600 hover:bg-indigo-700 text-white"
+                           >
+                             {bookingActionLoading === booking?.id ? 'Confirming Credit...' : 'Confirm Credit Payment'}
+                          </Button>
+                        )}
                      </td>
                    </tr>
                  ))}
-                  {currentAwaitingPayment.length === 0 && (
+                 {currentAwaitingPayment.length === 0 && (
                    <tr>
-                     <td colSpan={7} className="text-center py-4 text-gray-500">No completed bookings awaiting payment</td>{/* Update message */}
+                     <td colSpan={6} className="text-center py-4 text-gray-500">No completed bookings awaiting payment</td>
                    </tr>
                  )}
                </tbody>
@@ -844,32 +985,16 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
         </DialogContent>
       </Dialog>
 
-      {/* Finalize Booking Modal (Enter KG / Confirm Payment) */}
+      {/* Finalize Booking Modal (Enter KG) */}
       <Dialog
         open={showFinalizeModal.open}
         onOpenChange={(newOpenState) => setShowFinalizeModal({ open: newOpenState, booking: null })}
       >
         <DialogContent className="sm:max-w-[425px]" aria-describedby={undefined}>
           <DialogHeader>
-            <DialogTitle>{showFinalizeModal.booking?.isNoPlanBooking ? 'Confirm Payment' : 'Finalize Booking'}</DialogTitle>
+            <DialogTitle>Finalize Booking</DialogTitle>
           </DialogHeader>
           <div className="p-4">
-            {showFinalizeModal.booking?.isNoPlanBooking ? (
-              <div className="space-y-4">
-                <p>Confirm payment received for booking {showFinalizeModal.booking?.customBookingId || showFinalizeModal.booking?.id}.</p>
-                 <div>
-                    <label htmlFor="amountPaidModal" className="block text-sm font-medium text-gray-700">Amount Paid (₹)</label> {/* Corrected htmlFor */}
-                     <Input
-                        id="amountPaidModal"
-                        type="number"
-                        value={amountPaidModal}
-                        onChange={(e) => setAmountPaidModal(parseFloat(e.target.value))}
-                        placeholder="Enter amount paid"
-                        className="mt-1"
-                     />
-                  </div>
-              </div>
-            ) : (
               <div className="space-y-4">
                  <p>Enter KG used for booking {showFinalizeModal.booking?.customBookingId || showFinalizeModal.booking?.id}.</p>
                  <div>
@@ -882,17 +1007,21 @@ const BookingsTab = ({ bookings, onBookingsChange, users, generateReceipt, loadI
                         placeholder="Enter KG used"
                         className="mt-1"
                      />
+                {kgUsed && !isNaN(kgUsed as number) && (
+                  <p className="mt-2 text-sm text-gray-600">
+                    Amount will be calculated as: ₹{(kgUsed as number) * 40}
+                  </p>
+                )}
                   </div>
               </div>
-            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowFinalizeModal({ open: false, booking: null })}>Cancel</Button>
             <Button 
               onClick={handleFinalizeBooking}
-              disabled={bookingActionLoading === showFinalizeModal.booking?.id || (showFinalizeModal.booking?.isNoPlanBooking ? amountPaidModal === '' || isNaN(amountPaidModal as number) : kgUsed === '' || isNaN(kgUsed as number))}
-            > {/* Corrected check */}
-              {bookingActionLoading === showFinalizeModal.booking?.id ? 'Saving...' : (showFinalizeModal.booking?.isNoPlanBooking ? 'Confirm Payment' : 'Finalize Booking')}
+              disabled={bookingActionLoading === showFinalizeModal.booking?.id || kgUsed === '' || isNaN(kgUsed as number)}
+            >
+              {bookingActionLoading === showFinalizeModal.booking?.id ? 'Saving...' : 'Finalize Booking'}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -39,20 +39,6 @@ export async function generateReceipt(payment, user, dashboard, signatureBase64,
   doc.text('www.washitek.com   |   support@washitek.com   |   +91-XXXXXXXXXX', 105, 20, { align: 'center' });
   y = 32;
 
-  // Step 2: Add a subtle watermark (move lower to avoid overlap)
-  if (logoBase64) {
-    doc.saveGraphicsState();
-    doc.setGState(new doc.GState({ opacity: 0.08 }));
-    doc.addImage(logoBase64, 'PNG', 55, 110, 100, 50);
-    doc.restoreGraphicsState();
-  } else {
-    doc.saveGraphicsState();
-    doc.setFontSize(60);
-    doc.setTextColor(200, 200, 200);
-    doc.text('Washitek', 105, 170, { align: 'center', angle: 30 });
-    doc.restoreGraphicsState();
-  }
-
   // Add 'PAID' badge (top right, above QR code)
   doc.saveGraphicsState();
   doc.setFillColor('#004643');

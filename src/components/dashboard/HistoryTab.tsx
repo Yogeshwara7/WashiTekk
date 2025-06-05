@@ -322,7 +322,6 @@ const HistoryTab: React.FC<HistoryTabProps> = ({ bookings, onBookingsChange }) =
               <tr>
                 <th className="py-2 px-4">User</th>
                 <th className="py-2 px-4">Service</th>
-                <th className="py-2 px-4">Customer</th>
                 <th className="py-2 px-4">Pickup Date</th>
                 <th className="py-2 px-4">Mode of Payment</th>
                 <th className="py-2 px-4">Address</th>
@@ -377,7 +376,7 @@ const HistoryTab: React.FC<HistoryTabProps> = ({ bookings, onBookingsChange }) =
               ))}
               {currentHistoryBookings.length === 0 && (
                 <tr>
-                  <td colSpan={10} className="text-center py-4 text-gray-500">No booking history found</td>
+                  <td colSpan={9} className="text-center py-4 text-gray-500">No booking history found</td>
                 </tr>
               )}
             </tbody>

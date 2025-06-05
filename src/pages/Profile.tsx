@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { auth } from '../firebase';
-import { onAuthStateChanged, User, updateProfile } from 'firebase/auth';
+import { onAuthStateChanged, User, updateProfile, sendEmailVerification } from 'firebase/auth';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Mail, Phone, Edit2, Trash2, Plus } from 'lucide-react';
@@ -8,6 +8,9 @@ import { colors } from "@/styles/colors";
 import { db } from '../firebase';
 import { doc, getDoc, updateDoc, setDoc } from 'firebase/firestore';
 import { Input } from '@/components/ui/input';
+import ModernAuthForm from '../components/ModernAuthForm';
+import { toast } from 'react-hot-toast';
+import PhoneOTPComponent from '../components/PhoneOTPComponent';
 
 const Profile = () => {
   const [user, setUser] = useState<User | null>(null);
@@ -27,28 +30,57 @@ const Profile = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
+  const [phoneVerificationOpen, setPhoneVerificationOpen] = useState(false);
+  const [resendingEmail, setResendingEmail] = useState(false);
+  const [isAddingEmail, setIsAddingEmail] = useState(false);
+  const [newEmail, setNewEmail] = useState('');
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       setUser(firebaseUser);
+      console.log('Auth state changed. Firebase User:', firebaseUser);
       if (firebaseUser) {
         // Fetch profile data from Firestore
         const docRef = doc(db, 'users', firebaseUser.uid);
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
-          setProfileData(docSnap.data());
+          console.log('Profile data from Firestore:', docSnap.data());
+          const userData = docSnap.data();
+          setProfileData(userData);
           setForm({
-            name: docSnap.data().name || firebaseUser.displayName || '',
-            phone: docSnap.data().phone || firebaseUser.phoneNumber || '',
+            name: userData.name || firebaseUser.displayName || '',
+            phone: userData.phone || firebaseUser.phoneNumber || '',
             address: {
-              street: docSnap.data().address?.street || '',
-              city: docSnap.data().address?.city || '',
-              state: docSnap.data().address?.state || '',
-              zip: docSnap.data().address?.zip || '',
-              country: docSnap.data().address?.country || '',
+              street: userData.address?.street || '',
+              city: userData.address?.city || '',
+              state: userData.address?.state || '',
+              zip: userData.address?.zip || '',
+              country: userData.address?.country || '',
             },
           });
+
+          // --- NEW: Check and grant initial credit for existing users with verified phone ---
+          // Note: Firebase Auth's firebaseUser.phoneNumber is populated if the user signed up with phone/OTP
+          // or if it was explicitly linked via linkWithPhoneNumber. profileData.phoneVerified
+          // is a custom flag in Firestore set by our PhoneOTPComponent.
+          // We grant credit if firebaseUser has a phone AND initialCreditGranted is not set in Firestore.
+          if (firebaseUser.phoneNumber && !userData?.initialCreditGranted) {
+             try {
+                await updateDoc(docRef, {
+                   creditUsed: 0, // Assuming 500 is the limit, 0 used means 500 available
+                   initialCreditGranted: true,
+                });
+                console.log('Initial 500 credit granted for existing phone user:', firebaseUser.uid);
+                // Note: We don't show a toast here to avoid spamming existing users on every profile load
+                // A one-time notification might be better handled elsewhere or by the admin.
+             } catch (error) {
+                console.error('Error granting initial credit on profile load:', error);
+             }
+          }
+          // --- END NEW ---
+
         } else {
+          console.log('No profile data in Firestore for user:', firebaseUser.uid);
           setProfileData(null);
           setForm({
             name: firebaseUser.displayName || '',
@@ -73,6 +105,34 @@ const Profile = () => {
       setForm(f => ({ ...f, [name]: value }));
     }
   };
+  const handleNewEmailChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setNewEmail(e.target.value);
+  };
+  const handleSaveNewEmail = async () => {
+    if (!user || !newEmail) return;
+    setSaving(true);
+    setMessage('');
+    try {
+      const docRef = doc(db, 'users', user.uid);
+      await setDoc(docRef, {
+        ...profileData,
+        email: newEmail,
+        emailVerified: false,
+      }, { merge: true });
+      setMessage('Email added successfully!');
+      setIsAddingEmail(false);
+      setNewEmail('');
+      setProfileData(prev => ({ ...prev, email: newEmail, emailVerified: false }));
+    } catch (err) {
+      setMessage('Failed to add email.');
+    }
+    setSaving(false);
+  };
+  const handleCancelAddEmail = () => {
+    setIsAddingEmail(false);
+    setNewEmail('');
+    setMessage('');
+  };
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return;
@@ -96,6 +156,64 @@ const Profile = () => {
       setMessage('Failed to update profile.');
     }
     setSaving(false);
+  };
+
+  const handleResendVerificationEmail = async () => {
+    if (user && user.email && !user.emailVerified) {
+      setResendingEmail(true);
+      try {
+        await sendEmailVerification(user);
+        toast.success('Verification email sent. Please check your inbox.');
+      } catch (err: any) {
+        console.error('Error resending verification email:', err);
+        toast.error('Failed to resend verification email.');
+      }
+      setResendingEmail(false);
+    }
+  };
+
+  const handlePhoneLinked = async () => {
+    // Handle phone linked event
+    console.log('Phone linked successfully!');
+    // Update the state to reflect the verified phone number and close the modal
+
+    if (user) {
+      const userRef = doc(db, 'users', user.uid);
+      try {
+        const userDoc = await getDoc(userRef);
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          // Check if initial credit has already been granted
+          if (!userData?.initialCreditGranted) {
+            // Grant initial 500 credit (set creditUsed to 0) and mark as granted
+            await updateDoc(userRef, {
+              creditUsed: 0, // Assuming 500 is the limit, 0 used means 500 available
+              initialCreditGranted: true,
+            });
+            console.log('Initial 500 credit granted for user:', user.uid);
+            toast.success('Phone verified! 500 credits have been added to your account.');
+          } else {
+            console.log('Initial credit already granted for user:', user.uid);
+          }
+        } else {
+          console.warn('User document not found when trying to grant initial credit:', user.uid);
+        }
+      } catch (error) {
+        console.error('Error granting initial credit on phone link:', error);
+        toast.error('Failed to grant initial credit.');
+      }
+    }
+
+    setProfileData(prev => ({
+      ...prev,
+      phoneVerified: true,
+      // Optionally update the phone number in state if PhoneOTPComponent provides it,
+      // otherwise rely on the phone number already in the form state
+      phone: form.phone // Assuming form.phone holds the verified number
+    }));
+    setForm(prev => ({ ...prev, phone: form.phone })); // Ensure form state is also updated
+    setPhoneVerificationOpen(false); // Close the modal
+    toast.success('Phone number linked successfully!'); // Show a success toast
   };
 
   if (loading) return <div className="flex justify-center items-center h-64 text-white">Loading...</div>;
@@ -126,17 +244,66 @@ const Profile = () => {
             <div className="flex items-center justify-center gap-2 mb-2" style={{ color: colors.cardParagraph }}>
               <Phone className="w-4 h-4" />
               <span className="font-medium">{form.phone || user?.phoneNumber || 'N/A'}</span>
+              {profileData?.phoneVerified ? (
+                <span className="text-green-500 text-sm">✓ Verified</span>
+              ) : (
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="ml-2"
+                  onClick={() => setPhoneVerificationOpen(true)}
+                >
+                  Verify Phone
+                </Button>
+              )}
             </div>
             <div className="flex items-center justify-center gap-2 mb-2" style={{ color: colors.cardParagraph }}>
               <Mail className="w-4 h-4" />
-              {user?.email ? (
-                <span className="font-medium" style={{ color: colors.highlight }}>{user.email} <span className="text-xs ml-2" style={{ color: colors.cardParagraph }}>Verified</span></span>
+              {profileData?.email ? (
+                <span className="font-medium" style={{ color: colors.highlight }}>{profileData.email} </span>
               ) : (
-                <a href="#" className="underline" style={{ color: colors.highlight }}>Add Email</a>
+                isAddingEmail ? (
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="email"
+                      placeholder="Enter your email"
+                      value={newEmail}
+                      onChange={handleNewEmailChange}
+                      className="h-8 text-sm"
+                    />
+                    <Button onClick={handleSaveNewEmail} disabled={saving} size="sm">
+                      {saving ? 'Saving...' : 'Save'}
+                    </Button>
+                    <Button variant="outline" onClick={handleCancelAddEmail} size="sm">
+                      Cancel
+                    </Button>
+                  </div>
+                ) : (
+                  <a href="#" className="underline" style={{ color: colors.highlight }} onClick={() => { setIsAddingEmail(true); setMessage(''); }}>Add Email</a>
+                )
               )}
             </div>
           </div>
         </div>
+        {/* Phone Verification Modal */}
+        {phoneVerificationOpen && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+              <h2 className="text-xl font-bold mb-4">Verify Phone Number</h2>
+              <PhoneOTPComponent 
+                user={user!} 
+                onPhoneLinked={handlePhoneLinked}
+                initialPhoneNumber={form.phone}
+              />
+              <button
+                onClick={() => setPhoneVerificationOpen(false)}
+                className="mt-4 w-full bg-gray-200 text-gray-800 py-2 rounded hover:bg-gray-300 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
         {/* Edit Modal */}
         {editOpen && (
           <form
@@ -225,10 +392,10 @@ const Profile = () => {
             <div><b>Country:</b> {form.address.country}</div>
           </div>
         </div>
-        {/* Delete User Section */}
-        <div className="rounded-2xl shadow-lg p-6 text-center" style={{ background: colors.cardBackground, border: `1px solid ${colors.stroke}` }}>
-          {/* Delete user section content */}
-        </div>
+
+        {/* Persistent reCAPTCHA container for phone verification */}
+        <div id="recaptcha-container"></div>
+
       </div>
     </div>
   );

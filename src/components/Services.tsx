@@ -82,7 +82,7 @@ const Services = () => {
           <h2 className="text-3xl md:text-4xl font-bold text-brand-headline mb-4">
             Our Services
           </h2>
-          <p className="text-xl text-brand-cardparagraph">
+          <p className="text-xl text-white">
             Choose from our range of professional laundry services
           </p>
         </div>

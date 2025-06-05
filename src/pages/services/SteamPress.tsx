@@ -5,44 +5,28 @@ const SteamPress = () => {
   const pricingTiers = [
     {
       name: 'Basic Steam Press',
-      price: '₹50',
+      price: '₹10',
       unit: 'per piece',
       features: [
         'Standard steam pressing',
         'Basic garment care',
         'Crease setting',
         '24-hour turnaround',
-        'Free pickup & delivery (min 5 items)'
       ],
       popular: false
     },
     {
       name: 'Premium Steam Press',
-      price: '₹80',
+      price: '₹15',
       unit: 'per piece',
       features: [
         'Professional steam pressing',
         'Fabric conditioning',
         'Perfect creasing',
         'Same-day service',
-        'Free pickup & delivery',
         'Garment inspection'
       ],
       popular: true
-    },
-    {
-      name: 'Bulk Steam Press',
-      price: '₹40',
-      unit: 'per piece',
-      features: [
-        'Minimum 10 items',
-        'Standard pressing',
-        'Basic finishing',
-        '48-hour turnaround',
-        'Free pickup & delivery',
-        'Ideal for businesses'
-      ],
-      popular: false
     }
   ];
 
@@ -65,7 +49,7 @@ const SteamPress = () => {
           <h1 className="text-4xl font-bold text-brand-headline mb-4">Steam Press Service</h1>
           <p className="text-xl text-brand-subheadline">Professional steam pressing for crisp, wrinkle-free garments. Get your clothes expertly pressed and ready to wear.</p>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           {pricingTiers.map((tier) => (
             <div
               key={tier.name}
@@ -95,77 +79,41 @@ const SteamPress = () => {
             </div>
           ))}
         </div>
+
+        {/* Our Process Section */}
+        <div className="max-w-4xl mx-auto mt-16 bg-white rounded-xl shadow-lg p-8 border border-gray-200">
+          <h2 className="text-2xl font-bold text-gray-800 mb-8 text-center">Our Process</h2>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-8 text-center">
+            <div className="flex flex-col items-center">
+              <div className="w-12 h-12 flex items-center justify-center bg-blue-100 text-blue-700 rounded-full text-xl font-bold mb-4">1</div>
+              <h3 className="text-lg font-semibold text-gray-700 mb-2">Collection</h3>
+              <p className="text-gray-600 text-sm">Schedule a pickup and we'll collect your garments from your location.</p>
+            </div>
+            <div className="flex flex-col items-center">
+              <div className="w-12 h-12 flex items-center justify-center bg-blue-100 text-blue-700 rounded-full text-xl font-bold mb-4">2</div>
+              <h3 className="text-lg font-semibold text-gray-700 mb-2">Preparation</h3>
+              <p className="text-gray-600 text-sm">Garments are prepared for pressing, including light spraying if needed.</p>
+            </div>
+            <div className="flex flex-col items-center">
+              <div className="w-12 h-12 flex items-center justify-center bg-blue-100 text-blue-700 rounded-full text-xl font-bold mb-4">3</div>
+              <h3 className="text-lg font-semibold text-gray-700 mb-2">Steam Press</h3>
+              <p className="text-gray-600 text-sm">Professional pressing with industrial steam equipment for a crisp finish.</p>
+            </div>
+            <div className="flex flex-col items-center">
+              <div className="w-12 h-12 flex items-center justify-center bg-blue-100 text-blue-700 rounded-full text-xl font-bold mb-4">4</div>
+              <h3 className="text-lg font-semibold text-gray-700 mb-2">Quality Check & Delivery</h3>
+              <p className="text-gray-600 text-sm">Final inspection, careful packaging, and delivery to your doorstep.</p>
+            </div>
+          </div>
+        </div>
+
         <div className="text-center mt-12 text-brand-subheadline">
           All plans include professional handling of your garments and quality assurance.<br />
           For special requirements or bulk orders, please contact us.
-        </div>
-      </div>
-
-      {/* Individual Garment Prices */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-16">
-        <div className="bg-white rounded-2xl shadow-lg p-8">
-          <h2 className="text-2xl font-bold text-gray-900 mb-6">
-            Individual Garment Prices
-          </h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-            {garmentPrices.map((item) => (
-              <div key={item.item} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
-                <span className="text-gray-900 font-medium">{item.item}</span>
-                <span className="text-blue-600 font-bold">{item.price}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Process Steps */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-16">
-        <div className="bg-white rounded-2xl shadow-lg p-8">
-          <h2 className="text-2xl font-bold text-gray-900 mb-4">
-            Our Process
-          </h2>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-8">
-            <div>
-              <div className="bg-blue-100 rounded-full w-12 h-12 flex items-center justify-center mb-4">
-                <span className="text-blue-600 font-bold text-xl">1</span>
-              </div>
-              <h3 className="text-lg font-semibold mb-2">Inspection</h3>
-              <p className="text-gray-600">
-                Careful examination of garments and fabric type.
-              </p>
-            </div>
-            <div>
-              <div className="bg-blue-100 rounded-full w-12 h-12 flex items-center justify-center mb-4">
-                <span className="text-blue-600 font-bold text-xl">2</span>
-              </div>
-              <h3 className="text-lg font-semibold mb-2">Preparation</h3>
-              <p className="text-gray-600">
-                Light spraying and fabric conditioning if needed.
-              </p>
-            </div>
-            <div>
-              <div className="bg-blue-100 rounded-full w-12 h-12 flex items-center justify-center mb-4">
-                <span className="text-blue-600 font-bold text-xl">3</span>
-              </div>
-              <h3 className="text-lg font-semibold mb-2">Steam Press</h3>
-              <p className="text-gray-600">
-                Professional pressing with industrial steam equipment.
-              </p>
-            </div>
-            <div>
-              <div className="bg-blue-100 rounded-full w-12 h-12 flex items-center justify-center mb-4">
-                <span className="text-blue-600 font-bold text-xl">4</span>
-              </div>
-              <h3 className="text-lg font-semibold mb-2">Quality Check</h3>
-              <p className="text-gray-600">
-                Final inspection and careful packaging for delivery.
-              </p>
-            </div>
-          </div>
         </div>
       </div>
     </div>
   );
 };
 
-export default SteamPress; 
+export default SteamPress;

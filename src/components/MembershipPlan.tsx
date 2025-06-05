@@ -9,6 +9,7 @@ import { doc, setDoc, getDoc, updateDoc, arrayUnion, collection, addDoc } from '
 import ModernAuthForm from './ModernAuthForm';
 import { toast } from 'react-hot-toast';
 import { Timestamp } from 'firebase/firestore';
+import { Toaster } from 'react-hot-toast';
 
 // @ts-ignore
 declare global {
@@ -87,6 +88,7 @@ const MembershipPlan = ({ preselectedPlan = null, onClose }: MembershipPlanProps
   const [elite3kPending, setElite3kPending] = useState(false);
   const [elite3kVerifying, setElite3kVerifying] = useState(false);
   const [elite3kVerified, setElite3kVerified] = useState(false);
+  const [phoneVerified, setPhoneVerified] = useState(false);
 
   useEffect(() => {
     if (preselectedPlan) {
@@ -95,9 +97,9 @@ const MembershipPlan = ({ preselectedPlan = null, onClose }: MembershipPlanProps
         setSelectedPlan(plan.name);
         setSelectedPlanObj(plan);
         setShowModal(true);
-         if (plan.name === 'Elite Plus') {
-           setEliteKg(plan.kgLimit || 0);
-         }
+        if (plan.name === 'Elite Plus') {
+          setEliteKg(plan.kgLimit || 0);
+        }
       }
     }
   }, [preselectedPlan]);
@@ -153,43 +155,28 @@ const MembershipPlan = ({ preselectedPlan = null, onClose }: MembershipPlanProps
     return () => unsubscribe();
   }, []);
 
-  const handlePlanSelection = (plan: Plan) => {
-    const firebaseUser = auth.currentUser;
-    if (!firebaseUser) {
-      setShowAuthModal(true);
+  useEffect(() => {
+    const checkPhoneVerification = async () => {
+      const user = auth.currentUser;
+      if (user) {
+        const userRef = doc(db, 'users', user.uid);
+        const userSnap = await getDoc(userRef);
+        if (userSnap.exists()) {
+          setPhoneVerified(userSnap.data().phoneVerified || false);
+        }
+      }
+    };
+    checkPhoneVerification();
+  }, []);
+
+  const handlePlanSelection = (plan: string) => {
+    if (!phoneVerified) {
+      toast.error('Please verify your phone number before booking services');
       return;
     }
-    if (plan.name === 'Elite Plus') {
-      setEliteStep(1);
-      setEliteType('');
-      setEliteConditioner('Comfort');
-      // Set default kgLimit based on initial selection
-      setEliteKg(240); // Default to Without Fabric Conditioner
-      setElitePaymentMethod('');
-      setEliteTxnId('');
-      setEliteSummary('');
-      setElitePending(false);
-      setShowModal(true);
-      setSelectedPlan(plan.name);
-      setSelectedPlanObj(plan);
-      setVerified(false);
-      return;
-    }
-    if (plan.name === 'Elite') {
-      setElite3kStep(1);
-      setElite3kPaymentMethod('');
-      setElite3kTxnId('');
-      setElite3kPending(false);
-      setShowModal(true);
-      setSelectedPlan(plan.name);
-      setSelectedPlanObj(plan);
-      setVerified(false);
-      return;
-    }
-    setSelectedPlan(plan.name);
-    setSelectedPlanObj(plan);
+    setSelectedPlan(plan);
+    setSelectedPlanObj(plans.find(p => p.name === plan) || null);
     setShowModal(true);
-    setVerified(false);
   };
 
   const handleCloseModal = () => {
@@ -541,7 +528,7 @@ const MembershipPlan = ({ preselectedPlan = null, onClose }: MembershipPlanProps
                 ) : (
                 <Button 
                     className="mt-auto bg-yellow-400 hover:bg-yellow-500 text-gray-900 font-semibold"
-                    onClick={() => handlePlanSelection(plan)}
+                    onClick={() => handlePlanSelection(plan.name)}
                     disabled={loadingUserPlan}
                 >
                   SELECT PLAN
@@ -691,14 +678,14 @@ const MembershipPlan = ({ preselectedPlan = null, onClose }: MembershipPlanProps
                     const userData = userSnap.data();
                     
                     const planRequestData = {
-                      plan: 'Elite Plus',
-                      price: 10000,
-                      duration: '1 Year',
-                      type: eliteType,
-                      conditioner: eliteType === 'with' ? eliteConditioner : '',
-                      kgLimit: eliteKg,
-                      paymentMethod: elitePaymentMethod,
-                      txnId: elitePaymentMethod === 'online' ? eliteTxnId : '',
+                        plan: 'Elite Plus',
+                        price: 10000,
+                        duration: '1 Year',
+                        type: eliteType,
+                        conditioner: eliteType === 'with' ? eliteConditioner : '',
+                        kgLimit: eliteKg,
+                        paymentMethod: elitePaymentMethod,
+                        txnId: elitePaymentMethod === 'online' ? eliteTxnId : '',
                       status: elitePaymentMethod === 'online' ? 'active' : 'pending',
                       requestedAt: Timestamp.now(),
                       userId: firebaseUser.uid,
@@ -744,7 +731,7 @@ const MembershipPlan = ({ preselectedPlan = null, onClose }: MembershipPlanProps
                     } catch (error) {
                       console.error('Failed to process plan request:', error);
                       toast.error('Failed to process plan request. Please try again.');
-                      setElitePending(false);
+                    setElitePending(false);
                     }
                   }}>Submit</Button>
                   <Button className="w-full" variant="outline" onClick={() => setEliteStep(2)}>Back</Button>
@@ -802,11 +789,11 @@ const MembershipPlan = ({ preselectedPlan = null, onClose }: MembershipPlanProps
                     const userData = userSnap.data();
                     
                     const planRequestData = {
-                      plan: 'Elite',
-                      price: 3000,
-                      duration: '3 Months',
-                      paymentMethod: elite3kPaymentMethod,
-                      txnId: elite3kPaymentMethod === 'online' ? elite3kTxnId : '',
+                        plan: 'Elite',
+                        price: 3000,
+                        duration: '3 Months',
+                        paymentMethod: elite3kPaymentMethod,
+                        txnId: elite3kPaymentMethod === 'online' ? elite3kTxnId : '',
                       status: elite3kPaymentMethod === 'online' ? 'active' : 'pending',
                       requestedAt: Timestamp.now(),
                       userId: firebaseUser.uid,
@@ -820,8 +807,8 @@ const MembershipPlan = ({ preselectedPlan = null, onClose }: MembershipPlanProps
                         const planRequestsRef = collection(db, 'plan_requests');
                         await addDoc(planRequestsRef, planRequestData);
                          toast.success('Plan request submitted! Please pay the admin to activate your plan.');
-                         setElite3kPending(false);
-                         setElite3kStep(3);
+                    setElite3kPending(false);
+                    setElite3kStep(3);
                        } else if (elite3kPaymentMethod === 'online') {
                         // For online payment, activate plan immediately
                         const userRef = doc(db, 'users', firebaseUser.uid);
@@ -886,6 +873,7 @@ const MembershipPlan = ({ preselectedPlan = null, onClose }: MembershipPlanProps
           </div>
         )}
       </div>
+      <Toaster />
     </section>
   );
 };

@@ -5,45 +5,28 @@ const WashAndFold = () => {
   const pricingTiers = [
     {
       name: 'Basic Wash & Fold',
-      price: '₹80',
+      price: '₹40',
       unit: 'per kg',
       features: [
         'Regular clothes washing',
         'Machine drying',
         'Basic folding',
         '48-hour turnaround',
-        'Free pickup & delivery (min 5kg)'
       ],
       popular: false
     },
     {
       name: 'Premium Wash & Fold',
-      price: '₹120',
+      price: '₹50',
       unit: 'per kg',
       features: [
-        'Premium detergent',
-        'Fabric softener',
+        'Fabric softener(optional add-on, selectable during booking)',
         'Precise folding',
         '24-hour turnaround',
-        'Free pickup & delivery',
         'Stain treatment'
       ],
       popular: true
     },
-    {
-      name: 'Bulk Wash & Fold',
-      price: '₹60',
-      unit: 'per kg',
-      features: [
-        'Minimum 10kg',
-        'Regular washing',
-        'Basic folding',
-        '72-hour turnaround',
-        'Free pickup & delivery',
-        'Ideal for hostels & PGs'
-      ],
-      popular: false
-    }
   ];
 
   return (
@@ -53,7 +36,7 @@ const WashAndFold = () => {
           <h1 className="text-4xl font-bold text-brand-headline mb-4">Wash & Fold Service</h1>
           <p className="text-xl text-brand-subheadline">Professional washing and folding service for all your daily wear. Get your clothes back clean, fresh, and perfectly folded.</p>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           {pricingTiers.map((tier) => (
             <div
               key={tier.name}
@@ -88,6 +71,34 @@ const WashAndFold = () => {
             </div>
           ))}
         </div>
+
+        {/* Our Process Section */}
+        <div className="max-w-4xl mx-auto mt-16 bg-white rounded-xl shadow-lg p-8 border border-gray-200">
+          <h2 className="text-2xl font-bold text-gray-800 mb-8 text-center">Our Process</h2>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-8 text-center">
+            <div className="flex flex-col items-center">
+              <div className="w-12 h-12 flex items-center justify-center bg-blue-100 text-blue-700 rounded-full text-xl font-bold mb-4">1</div>
+              <h3 className="text-lg font-semibold text-gray-700 mb-2">Collection</h3>
+              <p className="text-gray-600 text-sm">Schedule a pickup and we'll collect your clothes from your location.</p>
+            </div>
+            <div className="flex flex-col items-center">
+              <div className="w-12 h-12 flex items-center justify-center bg-blue-100 text-blue-700 rounded-full text-xl font-bold mb-4">2</div>
+              <h3 className="text-lg font-semibold text-gray-700 mb-2">Washing</h3>
+              <p className="text-gray-600 text-sm">Your clothes are carefully sorted and washed using premium detergents.</p>
+            </div>
+            <div className="flex flex-col items-center">
+              <div className="w-12 h-12 flex items-center justify-center bg-blue-100 text-blue-700 rounded-full text-xl font-bold mb-4">3</div>
+              <h3 className="text-lg font-semibold text-gray-700 mb-2">Ironing</h3>
+              <p className="text-gray-600 text-sm">Each garment is professionally pressed and ironed to perfection.</p>
+            </div>
+            <div className="flex flex-col items-center">
+              <div className="w-12 h-12 flex items-center justify-center bg-blue-100 text-blue-700 rounded-full text-xl font-bold mb-4">4</div>
+              <h3 className="text-lg font-semibold text-gray-700 mb-2">Delivery</h3>
+              <p className="text-gray-600 text-sm">Your fresh, clean, and crisply ironed clothes are delivered to your doorstep.</p>
+            </div>
+          </div>
+        </div>
+
         <div className="text-center mt-12 text-brand-subheadline">
           All plans include professional handling of your garments and quality assurance.<br />
           For special requirements or bulk orders, please contact us.
